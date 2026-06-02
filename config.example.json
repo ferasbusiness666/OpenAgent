@@ -1,0 +1,9 @@
+{
+  "workspacePath": "./workspace",
+  "providerMode": "cli",
+  "activeCliName": "",
+  "apiKey": "",
+  "apiProvider": "anthropic",
+  "telegramToken": "",
+  "telegramChatId": ""
+}

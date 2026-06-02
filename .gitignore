@@ -1,0 +1,10 @@
+node_modules/
+dist/
+config.json
+workspace/
+*.log
+.DS_Store
+.env
+
+# Local Claude Code settings (machine-specific; keep the shared CLAUDE.md spec)
+.claude/settings.local.json

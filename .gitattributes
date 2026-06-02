@@ -1,0 +1,12 @@
+# Normalize line endings: store text as LF in the repo, check out native locally.
+* text=auto eol=lf
+
+# Keep these as LF everywhere (scripts/source).
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
+# Lockfiles and binaries
+package-lock.json -diff
+*.png binary
