@@ -25,14 +25,18 @@ interface GoogleResponse {
 export class APIProvider implements Provider {
   private readonly apiKey: string;
   private readonly apiProvider: ApiProviderName;
+  private readonly model: string;
 
-  constructor(apiKey: string, apiProvider: ApiProviderName) {
+  constructor(apiKey: string, apiProvider: ApiProviderName, model = "") {
     this.apiKey = apiKey;
     this.apiProvider = apiProvider;
+    this.model = model;
   }
 
   get name(): string {
-    return `api:${this.apiProvider}`;
+    return this.model
+      ? `api:${this.apiProvider} (${this.model})`
+      : `api:${this.apiProvider}`;
   }
 
   async complete(prompt: string): Promise<string> {
@@ -76,7 +80,7 @@ export class APIProvider implements Provider {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: this.model.trim() || "claude-sonnet-4-20250514",
         max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -105,7 +109,7 @@ export class APIProvider implements Provider {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-4o",
+          model: this.model.trim() || "gpt-4o",
           messages: [{ role: "user", content: prompt }],
         }),
       }
@@ -122,8 +126,11 @@ export class APIProvider implements Provider {
   }
 
   private async completeGoogle(prompt: string): Promise<string> {
+    const model = this.model.trim() || "gemini-2.0-flash";
     const endpoint =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
+      "https://generativelanguage.googleapis.com/v1beta/models/" +
+      encodeURIComponent(model) +
+      ":generateContent?key=" +
       encodeURIComponent(this.apiKey);
 
     const response = await fetch(endpoint, {

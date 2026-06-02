@@ -11,6 +11,8 @@ import {
 import { runSetup } from "./setup.js";
 import { AgentMemory } from "./memory/agent-md.js";
 import { SessionMemory } from "./memory/session.js";
+import { listProjects, createProject, touchProject } from "./memory/projects.js";
+import { newSessionFilePath } from "./memory/session-store.js";
 import { getProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
 import { closeBrowser } from "./tools/index.js";
@@ -89,6 +91,11 @@ async function main(): Promise<void> {
   if (options.task && options.task.trim().length > 0) {
     console.log(chalk.magenta.bold("Open Agent") + chalk.gray(` — provider: ${provider.name}`));
     console.log(chalk.gray(`workspace: ${workspacePath}\n`));
+    // Persist the headless run under a project (reuse the most recent, or a
+    // "default" one) so the session is saved to disk like interactive runs.
+    const project = listProjects()[0] ?? createProject("default");
+    touchProject(project.id);
+    session.bindPersistence(newSessionFilePath(project.id));
     attachConsoleListeners(loop);
     await loop.run(options.task.trim());
     await cleanup();
@@ -123,6 +130,7 @@ async function main(): Promise<void> {
       agentLoop: loop,
       providerName: provider.name,
       workspacePath,
+      session,
     }),
   );
 

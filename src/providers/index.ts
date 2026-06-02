@@ -31,8 +31,8 @@ export function getProvider(config?: Config): Provider {
           "Run setup to select a detected CLI, or switch to 'api' mode."
       );
     }
-    return new CLIProvider(cfg.activeCliName);
+    return new CLIProvider(cfg.activeCliName, cfg.activeModel);
   }
 
-  return new APIProvider(cfg.apiKey, cfg.apiProvider);
+  return new APIProvider(cfg.apiKey, cfg.apiProvider, cfg.activeModel);
 }

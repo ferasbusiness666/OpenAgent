@@ -5,6 +5,7 @@ interface StatusBarProps {
   status: AgentStatus;
   providerName: string;
   workspacePath: string;
+  projectName?: string;
 }
 
 /** Map a status to a label + color for the bar. */
@@ -25,8 +26,8 @@ function describe(status: AgentStatus): { label: string; color: string } {
   }
 }
 
-/** Always-visible bottom bar: status | provider | workspace. */
-export function StatusBar({ status, providerName, workspacePath }: StatusBarProps) {
+/** Always-visible bottom bar: status | project | provider | workspace. */
+export function StatusBar({ status, providerName, workspacePath, projectName }: StatusBarProps) {
   const { label, color } = describe(status);
   return (
     <Box
@@ -38,6 +39,7 @@ export function StatusBar({ status, providerName, workspacePath }: StatusBarProp
       <Text color={color} bold>
         ● {label}
       </Text>
+      {projectName ? <Text color="magenta">project: {projectName}</Text> : null}
       <Text color="cyan">provider: {providerName}</Text>
       <Text color="gray">ws: {workspacePath}</Text>
     </Box>

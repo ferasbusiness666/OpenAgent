@@ -2,6 +2,9 @@ node_modules/
 dist/
 config.json
 workspace/
+# Local runtime state — project registry and saved session transcripts.
+projects.json
+sessions/
 *.log
 .DS_Store
 .env

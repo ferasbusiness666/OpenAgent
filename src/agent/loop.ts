@@ -50,10 +50,15 @@ export declare interface AgentLoop {
  * self-corrects on failure until the model reports "done" or "stuck".
  */
 export class AgentLoop extends EventEmitter {
-  private readonly provider: Provider;
+  // Not readonly: the provider can be hot-swapped mid-session (see setProvider)
+  // so the user can switch model/provider via /model or /provider without
+  // losing the conversation — the shared SessionMemory carries the history.
+  private provider: Provider;
   private readonly session: SessionMemory;
   private readonly agentMemory: AgentMemory;
-  private readonly workspacePath: string;
+  // Cached for the system prompt; refreshed from config via refreshWorkspace()
+  // after a /settings change to the workspace path.
+  private workspacePath: string;
   private running = false;
 
   constructor(provider: Provider, session: SessionMemory, agentMemory: AgentMemory) {
@@ -67,6 +72,26 @@ export class AgentLoop extends EventEmitter {
   /** True while a run() is in progress (used by the Telegram queue). */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** Name of the currently active provider (e.g. "gemini" or "api:anthropic"). */
+  get providerName(): string {
+    return this.provider.name;
+  }
+
+  /**
+   * Swap the active provider. The conversation is NOT reset — the same
+   * SessionMemory keeps the full history, so the next provider turn continues
+   * exactly where the previous one left off. Used by mid-chat /model and
+   * /provider switches. Switching is only initiated by the UI while idle.
+   */
+  setProvider(provider: Provider): void {
+    this.provider = provider;
+  }
+
+  /** Re-read the workspace path from config (after a /settings change). */
+  refreshWorkspace(): void {
+    this.workspacePath = resolveWorkspacePath(getConfig());
   }
 
   /**

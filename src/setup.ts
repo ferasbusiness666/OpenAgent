@@ -113,18 +113,14 @@ export async function runSetup(): Promise<Config> {
     const wsAnswer = await ask(`Workspace path [${currentWorkspace}]: `);
     partial.workspacePath = wsAnswer.length > 0 ? wsAnswer : currentWorkspace;
 
-    // 6 & 7. Telegram (optional).
-    const token = await ask("Telegram bot token (press Enter to skip): ");
-    if (token.length > 0) {
-      partial.telegramToken = token;
-      const chatId = await ask("Telegram chat ID: ");
-      partial.telegramChatId = chatId;
-    }
+    // Telegram is intentionally NOT asked here anymore. It is configured later
+    // from inside the app via the /settings screen (or environment variables),
+    // so first-run setup stays focused on getting a working provider.
 
-    // 8. Persist.
+    // 6. Persist.
     const saved = saveConfig(partial);
 
-    // 9. Done.
+    // 7. Done.
     console.log("");
     console.log("Setup complete. Starting Open Agent...");
     console.log("");

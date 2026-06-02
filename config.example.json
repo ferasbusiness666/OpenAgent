@@ -4,6 +4,7 @@
   "activeCliName": "",
   "apiKey": "",
   "apiProvider": "anthropic",
+  "activeModel": "",
   "telegramToken": "",
   "telegramChatId": ""
 }

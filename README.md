@@ -9,7 +9,10 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Autonomous loop** — ReAct-style plan → act → observe → correct until the task is done.
 - **Real tools** — shell (sandboxed to the workspace), filesystem (traversal-blocked), and a reusable headless Chromium browser.
 - **Provider-agnostic** — drive it with a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) or a hosted API (OpenAI, Anthropic, Google).
-- **Persistent memory** — `AGENT.md` carries durable facts across sessions; session history is in-memory only.
+- **Projects & saved sessions** — pick or create a project at launch; every message is saved to a per-project session file on disk.
+- **Hot provider/model switching** — change provider or model mid-conversation (`/provider`, `/model`) without losing any history.
+- **Slash commands** — `/settings`, `/tools`, `/model`, `/provider`, `/history`, `/clear`, `/help` run inline from the chat.
+- **Persistent memory** — `AGENT.md` carries durable facts across sessions.
 - **Remote control** — optional Telegram bridge mirrors every step and accepts new tasks.
 
 ## Requirements
@@ -30,7 +33,23 @@ npx playwright install chromium
 npm start
 ```
 
-On first launch a setup wizard detects installed AI CLIs and asks how you want to connect (CLI or API key), where the workspace lives, and (optionally) Telegram credentials. Answers are saved to `config.json` (gitignored).
+On first launch a short setup wizard detects installed AI CLIs and asks only how you want to connect (CLI or API key) and where the workspace lives. Answers are saved to `config.json` (gitignored). Everything else — including Telegram — is configured later from inside the app via `/settings`.
+
+After setup, Open Agent shows a **project selector**: choose an existing project or create a new one. Each project keeps its own folder of saved sessions. Once a project is open you land in the chat; type a task, or type `/` to see the command menu.
+
+### Slash commands
+
+| Command | What it does |
+|---|---|
+| `/settings` | View and edit every config field (workspace, provider, model, Telegram), saved immediately. |
+| `/tools` | List the agent's available tools. |
+| `/model` | Switch the active model — the conversation is preserved. |
+| `/provider` | Switch the active provider (CLI ↔ API) — the conversation is preserved. |
+| `/history` | Show the current session's message history. |
+| `/clear` | Clear the conversation (stays in the same project). |
+| `/help` | Show the command list. |
+
+Switching provider or model never resets the conversation: the same on-disk session history is carried straight into the new provider's context.
 
 ## Configuration
 
@@ -42,11 +61,14 @@ All settings live in `config.json` at the project root. It is **gitignored** and
 | `providerMode` | `"cli"` or `"api"`. |
 | `activeCliName` | Detected CLI to drive (cli mode). |
 | `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google"` (api mode). |
-| `telegramToken` / `telegramChatId` | Optional remote control via Telegram. |
+| `activeModel` | Model name/id to use (e.g. `gpt-4o`, `gemini-2.0-flash`, `llama3`); blank = provider default. |
+| `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
+
+You can edit all of these live from inside the app with `/settings` — changes are written to `config.json` immediately, and provider/model/workspace changes take effect at once.
 
 ### Connecting Telegram later (recommended: environment variables)
 
-You don't have to put the Telegram token in `config.json`. The token and chat ID are read from the environment when present and **take precedence** over the file, so the secret never has to touch a saved file:
+You can set the Telegram token and chat ID at any time from `/settings` inside the app (saved to `config.json`). If you'd rather keep the secret out of any file, the token and chat ID are also read from the environment when present and **take precedence** over the file:
 
 ```bash
 # PowerShell
@@ -94,11 +116,15 @@ The loop executes the chosen tool, feeds the result back, and repeats. A failing
 
 ```
 src/
-  ui/        Ink terminal UI (App, ChatView, StatusBar, ToolOutput)
-  agent/     loop, planner, corrector
+  ui/        Ink terminal UI: App, ChatView, StatusBar, ToolOutput,
+             ProjectSelector, CommandMenu, SettingsScreen, ModelPicker,
+             ProviderPicker, commands
+  agent/     loop (hot-swappable provider), planner, corrector
   tools/     shell, filesystem, browser, registry
   providers/ detector, cli, api, factory
-  memory/    session (in-memory), agent-md (durable)
+  memory/    session (in-memory + optional disk persistence),
+             session-store (session file paths/serialization),
+             projects (projects.json registry), agent-md (durable)
   telegram/  remote-control bridge
   config/    zod-validated config
   setup.ts   first-run wizard

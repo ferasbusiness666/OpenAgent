@@ -1,10 +1,15 @@
 /**
  * SessionMemory — holds the conversation history for the current session.
  *
- * The history lives entirely in memory (a private array) and is NEVER
- * persisted to disk. When the session ends, the history is gone. This is by
- * design: the durable, cross-session memory lives in AGENT.md (see agent-md.ts).
+ * The history is kept in memory (a private array). By default nothing is written
+ * to disk. When a persistence path is bound via bindPersistence(), the history
+ * is additionally mirrored to that file and re-written on every change, so a
+ * session can be reloaded later. The durable, cross-session memory still lives
+ * in AGENT.md (see agent-md.ts); on-disk sessions are an opt-in convenience.
  */
+
+import fs from "fs-extra";
+import { serializeMessages, deserializeMessages } from "./session-store.js";
 
 /** A single entry in the session conversation history. */
 export type Message = {
@@ -14,12 +19,16 @@ export type Message = {
 };
 
 export class SessionMemory {
-  // In-memory only. Intentionally never written to disk.
+  // In-memory history. Mirrored to disk only when persistPath is set.
   private history: Message[] = [];
+
+  // Absolute path of the session file to mirror to, or null for in-memory only.
+  private persistPath: string | null = null;
 
   /** Append a fully-formed message to the history. */
   add(message: Message): void {
     this.history.push(message);
+    this.persist();
   }
 
   /**
@@ -29,6 +38,7 @@ export class SessionMemory {
   addMessage(role: Message["role"], content: string): Message {
     const message: Message = { role, content, timestamp: new Date() };
     this.history.push(message);
+    this.persist();
     return message;
   }
 
@@ -40,6 +50,7 @@ export class SessionMemory {
   /** Wipe the entire session history. */
   clear(): void {
     this.history = [];
+    this.persist();
   }
 
   /**
@@ -51,5 +62,54 @@ export class SessionMemory {
       return [];
     }
     return this.history.slice(-n);
+  }
+
+  /**
+   * Bind this session to a file on disk. From now on every change is mirrored
+   * there. When options.load is true and the file already exists, the current
+   * history is replaced by what was loaded from disk; otherwise the current
+   * history is written out immediately so the file exists.
+   */
+  bindPersistence(filePath: string, options?: { load?: boolean }): void {
+    this.persistPath = filePath;
+    if (options?.load && fs.existsSync(filePath)) {
+      this.loadFrom(filePath);
+    } else {
+      this.persist();
+    }
+  }
+
+  /**
+   * Replace the in-memory history with the contents of the given file. Any
+   * read/parse error leaves the history unchanged. Does NOT alter persistPath.
+   */
+  loadFrom(filePath: string): void {
+    if (!fs.existsSync(filePath)) {
+      return;
+    }
+    try {
+      const raw: unknown = fs.readJsonSync(filePath);
+      this.history = deserializeMessages(raw);
+    } catch {
+      // Leave history untouched on any failure.
+    }
+  }
+
+  /**
+   * Mirror the current history to disk when a persistence path is bound.
+   * A persistence failure must never crash the agent, so all errors are
+   * swallowed. No-op when no path is bound.
+   */
+  private persist(): void {
+    if (this.persistPath === null) {
+      return;
+    }
+    try {
+      fs.writeJsonSync(this.persistPath, serializeMessages(this.history), {
+        spaces: 2,
+      });
+    } catch {
+      // Swallow — persistence is best-effort.
+    }
   }
 }
