@@ -82,6 +82,7 @@ export function renderHistory(messages: Message[]): string {
     .map((m) => {
       if (m.role === "user") return `USER:\n${m.content}`;
       if (m.role === "assistant") return `ASSISTANT (your previous JSON response):\n${m.content}`;
+      if (m.role === "system") return `SYSTEM NOTE:\n${m.content}`;
       return `TOOL RESULT:\n${m.content}`;
     })
     .join("\n\n");

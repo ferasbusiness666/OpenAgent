@@ -2,13 +2,13 @@ import { ShellTool } from "./shell.js";
 import type { ShellResult } from "./shell.js";
 import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
-import { BrowserTool } from "./browser.js";
+import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
 
 export { ShellTool } from "./shell.js";
 export type { ShellResult } from "./shell.js";
 export { FilesystemTool, PathTraversalError } from "./filesystem.js";
 export type { FilesystemOperation } from "./filesystem.js";
-export { BrowserTool } from "./browser.js";
+export { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
 
 /** Validated parameter shape for the shell tool. */
 export interface ShellParams {
@@ -237,6 +237,9 @@ export async function executeTool(
     }
 
     // name === "browser"
+    if (!isBrowserAvailable()) {
+      return { success: false, result: "", error: BROWSER_UNAVAILABLE_MESSAGE };
+    }
     const parsed = parseBrowserParams(safeParams);
     if (typeof parsed === "string") {
       return { success: false, result: "", error: parsed };

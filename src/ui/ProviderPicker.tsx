@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { Config } from "../config/index.js";
+import type { ValidationResult } from "../config/validate.js";
 
 interface ProviderPickerProps {
   config: Config;
   detectedClis: string[];
-  /** Commit the chosen provider settings (validated against the schema in App). */
-  onSubmit: (patch: Record<string, string>) => void;
+  /** Validate + commit the chosen provider settings; resolves with the outcome. */
+  onSubmit: (patch: Record<string, string>) => Promise<ValidationResult>;
   onClose: () => void;
 }
 
@@ -15,16 +16,27 @@ type Step = "mode" | "cli" | "apiProvider" | "apiKey";
 const MODES = ["cli", "api"] as const;
 const API_PROVIDERS = ["openai", "anthropic", "google"] as const;
 
+/** Color the result line by its leading status glyph. */
+function statusColor(message: string): string {
+  if (message.startsWith("❌")) return "red";
+  if (message.startsWith("✅")) return "green";
+  if (message.startsWith("⚠")) return "yellow";
+  return "gray";
+}
+
 /**
  * Switch the active provider mid-conversation without losing history. A small
  * wizard: pick cli vs api, then either choose a detected CLI or pick an API
- * provider and enter its key. Esc steps back, or closes from the first step.
+ * provider and enter its key. The key is validated before saving. Esc steps
+ * back, or closes from the first step.
  */
 export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: ProviderPickerProps) {
   const [step, setStep] = useState<Step>("mode");
   const [selected, setSelected] = useState(0);
   const [apiProvider, setApiProvider] = useState(config.apiProvider);
   const [keyBuffer, setKeyBuffer] = useState(config.apiKey);
+  const [pending, setPending] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
 
   /** Move selection within a list of `length` items. */
   const move = (delta: number, length: number): void => {
@@ -34,7 +46,23 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
     setSelected((prev) => (prev + delta + length) % length);
   };
 
+  /** Validate + save; only the picker shows the error, App closes on success. */
+  const submit = (patch: Record<string, string>): void => {
+    setPending(true);
+    setStatusMsg("validating…");
+    void onSubmit(patch).then((res) => {
+      setPending(false);
+      if (!res.ok) {
+        setStatusMsg(res.message);
+      }
+    });
+  };
+
   useInput((value, key) => {
+    if (pending) {
+      return;
+    }
+
     if (step === "mode") {
       if (key.escape) {
         onClose();
@@ -63,7 +91,7 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       if (key.downArrow) return move(1, detectedClis.length);
       if (key.return) {
         const cli = detectedClis[selected];
-        onSubmit({ providerMode: "cli", activeCliName: cli });
+        submit({ providerMode: "cli", activeCliName: cli });
       }
       return;
     }
@@ -89,7 +117,7 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       return;
     }
     if (key.return) {
-      onSubmit({ providerMode: "api", apiProvider, apiKey: keyBuffer.trim() });
+      submit({ providerMode: "api", apiProvider, apiKey: keyBuffer.trim() });
       return;
     }
     if (key.backspace || key.delete) {
@@ -161,6 +189,7 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       <Box marginTop={1}>
         <Text color="gray">↑/↓ choose · Enter confirm · Esc back · conversation is kept</Text>
       </Box>
+      {statusMsg.length > 0 ? <Text color={statusColor(statusMsg)}>{statusMsg}</Text> : null}
     </Box>
   );
 }

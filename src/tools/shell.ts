@@ -1,5 +1,6 @@
 import { exec } from "node:child_process";
 import path from "node:path";
+import fs from "fs-extra";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
 
 /** Result of running a shell command. */
@@ -11,6 +12,31 @@ export interface ShellResult {
 
 const TIMEOUT_MS = 30_000;
 const MAX_BUFFER = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Pick the shell binary to run commands through, by OS:
+ *   Windows → %ComSpec% (cmd.exe).
+ *   macOS/Linux → /bin/bash when present, otherwise /bin/sh.
+ * Returning an explicit path keeps behavior predictable across platforms rather
+ * than relying on exec's implicit default.
+ */
+function pickShell(): string {
+  if (process.platform === "win32") {
+    return process.env.ComSpec && process.env.ComSpec.trim().length > 0
+      ? process.env.ComSpec
+      : "cmd.exe";
+  }
+  for (const candidate of ["/bin/bash", "/usr/bin/bash"]) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Fall through to the next candidate.
+    }
+  }
+  return "/bin/sh";
+}
 
 /**
  * Patterns for catastrophic / system-destroying commands that must never run,
@@ -129,6 +155,7 @@ export class ShellTool {
           timeout: TIMEOUT_MS,
           maxBuffer: MAX_BUFFER,
           windowsHide: true,
+          shell: pickShell(),
         },
         (error, stdout, stderr) => {
           if (error) {

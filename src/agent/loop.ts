@@ -10,6 +10,7 @@ import {
   type AgentResponse,
 } from "./planner.js";
 import { Corrector } from "./corrector.js";
+import { extractJsonObject } from "../util/json.js";
 
 /** Hard ceiling on provider turns per run() to prevent runaway loops. */
 const MAX_ITERATIONS = 50;
@@ -263,46 +264,6 @@ export function parseAgentResponse(raw: string): ParseSuccess | ParseFailure {
     return { error: validated.error.issues.map((i) => i.message).join("; ") };
   }
   return { value: validated.data };
-}
-
-/**
- * Extract the first balanced top-level JSON object from arbitrary text,
- * accounting for strings and escape sequences so braces inside strings don't
- * confuse the matcher. Strips ```json / ``` fences first.
- */
-function extractJsonObject(raw: string): string | null {
-  const stripped = raw.replace(/```json/gi, "```").replace(/```/g, "");
-  const start = stripped.indexOf("{");
-  if (start === -1) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < stripped.length; i += 1) {
-    const ch = stripped[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === "{") {
-      depth += 1;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return stripped.slice(start, i + 1);
-      }
-    }
-  }
-  return null;
 }
 
 /** Deterministic stringify (sorted keys) so identical params share a signature. */

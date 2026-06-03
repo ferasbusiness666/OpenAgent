@@ -16,6 +16,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", description: "Switch the active model (keeps the conversation)" },
   { name: "/provider", description: "Switch the active provider (keeps the conversation)" },
   { name: "/history", description: "Show this session's message history" },
+  { name: "/sessions", description: "List and load a recent session for this project" },
   { name: "/clear", description: "Clear the conversation (stays in the same project)" },
   { name: "/help", description: "Show the list of commands" },
 ];

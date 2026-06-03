@@ -1,18 +1,25 @@
 import fs from "fs-extra";
 import path from "node:path";
-import { PROJECT_ROOT } from "../config/index.js";
+import { GLOBAL_AGENT_MD_PATH } from "../paths.js";
+import { getActiveWorkspace } from "../config/index.js";
 
 /**
- * AgentMemory — durable, cross-session memory backed by AGENT.md at the
- * project root. The planner injects this content into the system prompt, and
- * the agent updates it when it learns persistent facts about the user.
+ * AgentMemory — durable, cross-session memory backed by TWO AGENT.md files that
+ * are merged into the system prompt:
+ *
+ *   1. ~/.openagent/AGENT.md — global memory (preferences, general info about
+ *      the user) that applies to every project.
+ *   2. <workspace>/AGENT.md — project-specific memory for the current directory.
+ *
+ * Either file is created from a default template the first time it is needed.
+ * The planner injects getContent() (the merged view) into the system prompt;
+ * persistent updates the agent makes are written to the project-level file.
  */
 
-/** Absolute path to the AGENT.md file at the project root. */
-export const AGENT_MD_PATH = path.join(PROJECT_ROOT, "AGENT.md");
+/** Default contents for the global memory file. */
+export const DEFAULT_GLOBAL_AGENT_MD = `# Global Agent Memory
 
-/** Default contents written when AGENT.md does not yet exist. */
-export const DEFAULT_AGENT_MD = `# Agent Memory
+Durable facts that apply across every project.
 
 ## About the User
 (nothing yet)
@@ -24,75 +31,134 @@ export const DEFAULT_AGENT_MD = `# Agent Memory
 (nothing yet)
 `;
 
+/** Default contents for a project's memory file. */
+export const DEFAULT_PROJECT_AGENT_MD = `# Project Agent Memory
+
+Durable facts specific to this project / directory.
+
+## About this Project
+(nothing yet)
+
+## Conventions
+(nothing yet)
+
+## Notes
+(nothing yet)
+`;
+
+interface AgentMemoryOptions {
+  /** Override the global AGENT.md location (defaults to ~/.openagent/AGENT.md). */
+  globalPath?: string;
+  /** Override the project directory (defaults to the active workspace). */
+  projectDir?: string;
+  /** Read both files on construction (default true). */
+  load?: boolean;
+}
+
+/** Read a file, creating it from `template` (and any missing parent dir) if absent. */
+function readOrCreate(filePath: string, template: string): string {
+  try {
+    if (fs.existsSync(filePath)) {
+      return fs.readFileSync(filePath, "utf8");
+    }
+    fs.ensureDirSync(path.dirname(filePath));
+    fs.writeFileSync(filePath, template, "utf8");
+    return template;
+  } catch {
+    // If we cannot read or create it, fall back to the in-memory template so the
+    // planner still has something coherent to inject.
+    return template;
+  }
+}
+
 export class AgentMemory {
-  // In-memory mirror of the on-disk AGENT.md content, kept in sync on writes.
-  private content = "";
+  private readonly globalPath: string;
+  private readonly projectDirOverride: string | null;
+  private globalContent = "";
+  private projectContent = "";
   private loaded = false;
 
-  /**
-   * If `load` is true (the default), the AGENT.md file is read immediately on
-   * construction, creating it from the default template when missing.
-   */
-  constructor(load = true) {
-    if (load) {
+  constructor(options: AgentMemoryOptions = {}) {
+    this.globalPath = options.globalPath ?? GLOBAL_AGENT_MD_PATH;
+    this.projectDirOverride = options.projectDir ?? null;
+    if (options.load !== false) {
       this.load();
     }
   }
 
-  /**
-   * Read AGENT.md from the project root into memory. If the file does not
-   * exist, it is created from the default template first, then loaded.
-   */
-  load(): string {
-    if (!fs.existsSync(AGENT_MD_PATH)) {
-      fs.writeFileSync(AGENT_MD_PATH, DEFAULT_AGENT_MD, "utf8");
-      this.content = DEFAULT_AGENT_MD;
-      this.loaded = true;
-      return this.content;
-    }
+  /** Resolve the project AGENT.md path against the (current) active workspace. */
+  private projectPath(): string {
+    const dir = this.projectDirOverride ?? getActiveWorkspace();
+    return path.join(dir, "AGENT.md");
+  }
 
-    this.content = fs.readFileSync(AGENT_MD_PATH, "utf8");
+  /** Read both memory files into memory, creating either from its template if missing. */
+  load(): void {
+    this.globalContent = readOrCreate(this.globalPath, DEFAULT_GLOBAL_AGENT_MD);
+    this.projectContent = readOrCreate(this.projectPath(), DEFAULT_PROJECT_AGENT_MD);
     this.loaded = true;
-    return this.content;
   }
 
   /**
-   * Return the current AGENT.md content. Loads from disk on first access if it
-   * has not been loaded yet (e.g. when constructed with `load = false`).
+   * The merged memory injected into the system prompt: global memory first, then
+   * the current project's memory, each under a labeled heading.
    */
   getContent(): string {
     if (!this.loaded) {
       this.load();
     }
-    return this.content;
+    return [
+      "## Global memory (applies to every project)",
+      this.globalContent.trim(),
+      "",
+      `## Project memory (${this.projectPath()})`,
+      this.projectContent.trim(),
+    ].join("\n");
   }
 
-  /**
-   * Rewrite AGENT.md entirely with `newContent`, persisting to disk and keeping
-   * the in-memory copy in sync.
-   */
+  /** Current project AGENT.md contents (loads on first access). */
+  getProjectContent(): string {
+    if (!this.loaded) {
+      this.load();
+    }
+    return this.projectContent;
+  }
+
+  /** Current global AGENT.md contents (loads on first access). */
+  getGlobalContent(): string {
+    if (!this.loaded) {
+      this.load();
+    }
+    return this.globalContent;
+  }
+
+  /** Rewrite the PROJECT AGENT.md entirely, persisting and keeping memory in sync. */
   update(newContent: string): void {
-    this.content = newContent;
+    this.projectContent = newContent;
     this.loaded = true;
-    fs.writeFileSync(AGENT_MD_PATH, newContent, "utf8");
+    const filePath = this.projectPath();
+    fs.ensureDirSync(path.dirname(filePath));
+    fs.writeFileSync(filePath, newContent, "utf8");
   }
 
-  /**
-   * Append a section/text under the existing content. Ensures the existing
-   * content ends with a newline before appending so sections stay separated,
-   * then persists the combined content to disk.
-   */
+  /** Append a section to the PROJECT AGENT.md, persisting the combined content. */
   append(section: string): void {
     if (!this.loaded) {
       this.load();
     }
-
-    const base = this.content.endsWith("\n") || this.content.length === 0
-      ? this.content
-      : `${this.content}\n`;
+    const base =
+      this.projectContent.endsWith("\n") || this.projectContent.length === 0
+        ? this.projectContent
+        : `${this.projectContent}\n`;
     const addition = section.endsWith("\n") ? section : `${section}\n`;
-    const combined = `${base}${addition}`;
+    this.update(`${base}${addition}`);
+  }
 
-    this.update(combined);
+  /** Rewrite the GLOBAL AGENT.md entirely, persisting and keeping memory in sync. */
+  updateGlobal(newContent: string): void {
+    this.globalContent = newContent;
+    this.loaded = true;
+    fs.ensureDirSync(path.dirname(this.globalPath));
+    fs.writeFileSync(this.globalPath, newContent, "utf8");
   }
 }

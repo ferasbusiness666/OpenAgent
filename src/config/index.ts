@@ -1,20 +1,20 @@
 import fs from "fs-extra";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { CONFIG_PATH, ensureDataDir } from "../paths.js";
 
-// Resolve the project root from this module's location: src/config/index.ts -> ../../
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-export const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-export const CONFIG_PATH = path.join(PROJECT_ROOT, "config.json");
+export { CONFIG_PATH } from "../paths.js";
 
 /**
- * Config schema. Empty defaults are used when config.json does not yet exist
- * so the setup wizard can detect an incomplete configuration and run.
+ * Config schema. Empty defaults are used when config.json does not yet exist so
+ * the setup wizard can detect an incomplete configuration and run.
+ *
+ * `workspacePath` defaults to "" — the agent's working directory is normally the
+ * directory it was launched in (see the active-workspace helpers below). A
+ * non-empty value is an explicit override the user can set from /settings.
  */
 export const ConfigSchema = z.object({
-  workspacePath: z.string().default("./workspace"),
+  workspacePath: z.string().default(""),
   providerMode: z.enum(["cli", "api"]).default("cli"),
   activeCliName: z.string().default(""),
   apiKey: z.string().default(""),
@@ -28,6 +28,29 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 const EMPTY_CONFIG: Config = ConfigSchema.parse({});
 
+// ---- Active workspace ------------------------------------------------------
+//
+// The agent's working directory ("workspace") is the directory it was launched
+// in (process.cwd()). When a project is opened we point it at that project's
+// directory — which, in the normal launch flow, is the same cwd. /settings can
+// override it for the current session. All tool operations resolve against this.
+
+let activeWorkspace = process.cwd();
+
+/** Absolute path of the directory the agent's tools currently operate in. */
+export function getActiveWorkspace(): string {
+  return activeWorkspace;
+}
+
+/**
+ * Point the active workspace at `dir` (resolved to an absolute path). An empty
+ * value resets it to the launch directory (process.cwd()).
+ */
+export function setActiveWorkspace(dir: string): void {
+  const trimmed = typeof dir === "string" ? dir.trim() : "";
+  activeWorkspace = trimmed.length > 0 ? path.resolve(trimmed) : process.cwd();
+}
+
 /**
  * Read config from config.json only (no environment overlay). If the file does
  * not exist, it is created with empty defaults. Malformed JSON or invalid
@@ -37,9 +60,9 @@ const EMPTY_CONFIG: Config = ConfigSchema.parse({});
  * environment variables are never written back into config.json.
  */
 function readFileConfig(): Config {
+  ensureDataDir();
   if (!fs.existsSync(CONFIG_PATH)) {
     fs.writeJsonSync(CONFIG_PATH, EMPTY_CONFIG, { spaces: 2 });
-    ensureWorkspace(EMPTY_CONFIG);
     return { ...EMPTY_CONFIG };
   }
 
@@ -53,16 +76,13 @@ function readFileConfig(): Config {
   }
 
   const parsed = ConfigSchema.safeParse(raw);
-  const config = parsed.success ? parsed.data : { ...EMPTY_CONFIG };
-  ensureWorkspace(config);
-  return config;
+  return parsed.success ? parsed.data : { ...EMPTY_CONFIG };
 }
 
 /**
  * Overlay secrets from the environment so the Telegram token (and chat id) can
  * be supplied at runtime without ever living in a committed/persisted file.
- * Environment values always take precedence over config.json. This is the
- * recommended "connect it later" path after cloning the repo.
+ * Environment values always take precedence over config.json.
  */
 function applyEnvOverrides(config: Config): Config {
   const result = { ...config };
@@ -91,29 +111,35 @@ export function getConfig(): Config {
  * token is never written to disk. Returns the effective (env-overlaid) config.
  */
 export function saveConfig(partial: Partial<Config>): Config {
+  ensureDataDir();
   const current = readFileConfig();
   const merged: Config = { ...current, ...partial };
   const validated = ConfigSchema.parse(merged);
   fs.writeJsonSync(CONFIG_PATH, validated, { spaces: 2 });
-  ensureWorkspace(validated);
   return applyEnvOverrides(validated);
 }
 
 /**
- * Ensure the workspace folder exists. Resolves relative workspace paths
- * against the project root so the agent always has a real directory to use.
+ * Resolve the directory the agent works in. With the workspace-as-cwd model the
+ * active workspace is authoritative; the config arg is accepted for backward
+ * compatibility but no longer changes the result.
  */
-export function ensureWorkspace(config: Config): string {
-  const abs = resolveWorkspacePath(config);
-  fs.ensureDirSync(abs);
-  return abs;
+export function resolveWorkspacePath(_config?: Config): string {
+  return activeWorkspace;
 }
 
-/** Absolute path to the configured workspace folder. */
-export function resolveWorkspacePath(config: Config): string {
-  return path.isAbsolute(config.workspacePath)
-    ? config.workspacePath
-    : path.resolve(PROJECT_ROOT, config.workspacePath);
+/**
+ * Ensure the active workspace directory exists and return it. The launch
+ * directory always exists, so this is normally a no-op; it stays defensive for
+ * an explicit /settings override that points somewhere new.
+ */
+export function ensureWorkspace(_config?: Config): string {
+  try {
+    fs.ensureDirSync(activeWorkspace);
+  } catch {
+    // The directory should already exist (it's where we were launched).
+  }
+  return activeWorkspace;
 }
 
 /**

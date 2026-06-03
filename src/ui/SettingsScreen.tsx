@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { Config } from "../config/index.js";
+import type { ValidationResult } from "../config/validate.js";
 
 interface SettingsScreenProps {
   config: Config;
   detectedClis: string[];
-  /** Persist a single edited field. Validated against the schema in App. */
-  onSave: (patch: Record<string, string>) => void;
+  /** Validate + persist a single edited field. Resolves with the outcome to show. */
+  onSave: (patch: Record<string, string>) => Promise<ValidationResult>;
   onClose: () => void;
 }
 
@@ -42,6 +43,8 @@ function maskSecret(value: string): string {
 /** Contextual hint shown under the selected field. */
 function helpFor(field: Field, detected: string[]): string {
   switch (field.key) {
+    case "workspacePath":
+      return "blank = the launch directory (cwd); a non-empty path must exist and be writable";
     case "providerMode":
       return "cli = drive a local AI CLI · api = call a hosted API";
     case "activeCliName":
@@ -49,35 +52,57 @@ function helpFor(field: Field, detected: string[]): string {
     case "apiProvider":
       return "used when provider mode is 'api'";
     case "apiKey":
-      return "used when provider mode is 'api' — stored in config.json";
+      return "validated with a live request before saving";
     case "activeModel":
       return "model name/id (e.g. gpt-4o, claude-sonnet-4, gemini-2.0-flash, llama3); blank = provider default";
     case "telegramToken":
-      return "optional remote control; leave blank to disable Telegram";
+      return "validated via getMe; leave blank to disable Telegram";
     default:
       return "";
   }
 }
 
+/** Color the result line by its leading status glyph. */
+function statusColor(message: string): string {
+  if (message.startsWith("❌")) return "red";
+  if (message.startsWith("✅")) return "green";
+  if (message.startsWith("⚠")) return "yellow";
+  return "gray";
+}
+
 /**
  * Full settings editor overlay. Up/down to choose a field, Enter to edit (text)
- * or cycle (enum), Enter again to commit (saved to config.json immediately via
- * onSave), Esc to cancel an edit or close the screen.
+ * or cycle (enum), Enter again to validate + commit (saved to config.json on
+ * success), Esc to cancel an edit or close. Values are validated live and the
+ * outcome is shown; invalid values are not saved.
  */
 export function SettingsScreen({ config, detectedClis, onSave, onClose }: SettingsScreenProps) {
   const [selected, setSelected] = useState(0);
   const [editing, setEditing] = useState(false);
   const [buffer, setBuffer] = useState("");
+  const [pending, setPending] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
 
   const field = FIELDS[selected];
 
   const commit = (value: string): void => {
     const patch: Record<string, string> = {};
     patch[field.key] = value;
-    onSave(patch);
+    setPending(true);
+    setStatusMsg("validating…");
+    void onSave(patch).then((res) => {
+      setStatusMsg(res.message);
+      setPending(false);
+    });
   };
 
   useInput((value, key) => {
+    // While a validation request is in flight, ignore input so we don't fire
+    // overlapping saves.
+    if (pending) {
+      return;
+    }
+
     if (editing) {
       if (key.escape) {
         setEditing(false);
@@ -107,10 +132,12 @@ export function SettingsScreen({ config, detectedClis, onSave, onClose }: Settin
     }
     if (key.upArrow) {
       setSelected((prev) => (prev <= 0 ? FIELDS.length - 1 : prev - 1));
+      setStatusMsg("");
       return;
     }
     if (key.downArrow) {
       setSelected((prev) => (prev >= FIELDS.length - 1 ? 0 : prev + 1));
+      setStatusMsg("");
       return;
     }
     if (key.return) {
@@ -142,7 +169,7 @@ export function SettingsScreen({ config, detectedClis, onSave, onClose }: Settin
           const raw = String(config[f.key]);
           let shown: string;
           if (active && editing) {
-            shown = f.type === "secret" ? buffer : buffer;
+            shown = buffer;
           } else if (f.type === "secret") {
             shown = maskSecret(raw);
           } else {
@@ -167,6 +194,11 @@ export function SettingsScreen({ config, detectedClis, onSave, onClose }: Settin
       <Box marginTop={1}>
         <Text color="gray">{helpFor(field, detectedClis)}</Text>
       </Box>
+      {statusMsg.length > 0 ? (
+        <Box>
+          <Text color={statusColor(statusMsg)}>{statusMsg}</Text>
+        </Box>
+      ) : null}
     </Box>
   );
 }

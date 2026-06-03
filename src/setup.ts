@@ -1,6 +1,6 @@
 import readline from "node:readline";
 import { spawnSync } from "node:child_process";
-import { saveConfig, getConfig, type Config } from "./config/index.js";
+import { saveConfig, type Config } from "./config/index.js";
 
 /**
  * CLIs we know how to drive. Keep in sync with src/providers/detector.ts and
@@ -108,19 +108,14 @@ export async function runSetup(): Promise<Config> {
       partial.activeCliName = options[choiceIndex];
     }
 
-    // 5. Workspace path.
-    const currentWorkspace = getConfig().workspacePath || "./workspace";
-    const wsAnswer = await ask(`Workspace path [${currentWorkspace}]: `);
-    partial.workspacePath = wsAnswer.length > 0 ? wsAnswer : currentWorkspace;
+    // That is all the first-run wizard asks. The workspace is the directory the
+    // agent was launched in (no separate workspace path), and Telegram is
+    // configured later from inside the app via /settings (or environment vars).
 
-    // Telegram is intentionally NOT asked here anymore. It is configured later
-    // from inside the app via the /settings screen (or environment variables),
-    // so first-run setup stays focused on getting a working provider.
-
-    // 6. Persist.
+    // 4. Persist.
     const saved = saveConfig(partial);
 
-    // 7. Done.
+    // 5. Done.
     console.log("");
     console.log("Setup complete. Starting Open Agent...");
     console.log("");

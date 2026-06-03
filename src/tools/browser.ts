@@ -1,7 +1,35 @@
 import path from "node:path";
+import fs from "fs-extra";
 import { chromium } from "playwright";
 import type { Browser, Page } from "playwright";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
+
+// Cached result of the chromium-binary check (the path never changes at runtime).
+let browserAvailableCache: boolean | null = null;
+
+/**
+ * True when Playwright's Chromium binary is actually installed. We check the
+ * resolved executable path on disk rather than trusting that the npm package is
+ * present, so a missing `npx playwright install chromium` degrades gracefully
+ * instead of throwing when the browser tool is first used.
+ */
+export function isBrowserAvailable(): boolean {
+  if (browserAvailableCache !== null) {
+    return browserAvailableCache;
+  }
+  try {
+    const execPath = chromium.executablePath();
+    browserAvailableCache =
+      typeof execPath === "string" && execPath.length > 0 && fs.existsSync(execPath);
+  } catch {
+    browserAvailableCache = false;
+  }
+  return browserAvailableCache;
+}
+
+/** Message shown when the browser tool is requested but Chromium is missing. */
+export const BROWSER_UNAVAILABLE_MESSAGE =
+  "Browser tool unavailable — run `npx playwright install chromium` to enable.";
 
 /**
  * Drives a single headless Chromium instance for the lifetime of the session.

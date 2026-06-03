@@ -1,21 +1,34 @@
 import { createElement } from "react";
 import { render } from "ink";
 import { Command } from "commander";
+import path from "node:path";
 import chalk from "chalk";
 import {
   getConfig,
   isConfigComplete,
-  resolveWorkspacePath,
+  setActiveWorkspace,
+  getActiveWorkspace,
   type Config,
 } from "./config/index.js";
+import { migrateLegacyData } from "./paths.js";
 import { runSetup } from "./setup.js";
+import { runStartupFlow } from "./startup.js";
 import { AgentMemory } from "./memory/agent-md.js";
 import { SessionMemory } from "./memory/session.js";
-import { listProjects, createProject, touchProject } from "./memory/projects.js";
-import { newSessionFilePath } from "./memory/session-store.js";
+import {
+  getProjectByPath,
+  createProject,
+  touchProject,
+  type Project,
+} from "./memory/projects.js";
+import {
+  newSessionFilePath,
+  listSessionFiles,
+  pruneOldSessions,
+} from "./memory/session-store.js";
 import { getProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
-import { closeBrowser } from "./tools/index.js";
+import { closeBrowser, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./tools/index.js";
 import { TelegramBridge } from "./telegram/bridge.js";
 import { App } from "./ui/App.js";
 
@@ -23,7 +36,7 @@ interface CliOptions {
   task?: string;
 }
 
-/** Attach plain-text console listeners to the loop (used in headless mode). */
+/** Attach plain-text console listeners to the loop (headless / fallback mode). */
 function attachConsoleListeners(loop: AgentLoop): void {
   loop.on("thought", (t) => console.log(chalk.gray.italic(`  thinking: ${t}`)));
   loop.on("toolCall", ({ tool, params }) =>
@@ -39,28 +52,110 @@ function attachConsoleListeners(loop: AgentLoop): void {
   loop.on("error", (m) => console.log(chalk.red.bold(`\n✗ Error: ${m}`)));
 }
 
+/** Bind a session for `project`, optionally reloading its most recent file. */
+function bindSession(session: SessionMemory, project: Project, loadLast: boolean): void {
+  if (loadLast) {
+    const latest = listSessionFiles(project.id)[0];
+    if (latest) {
+      session.bindPersistence(latest, { load: true, projectId: project.id });
+      return;
+    }
+  }
+  session.bindPersistence(newSessionFilePath(project.id), { projectId: project.id });
+}
+
 async function main(): Promise<void> {
   const program = new Command();
   program
-    .name("open-agent")
+    .name("openagent")
     .description("Open Agent — an autonomous local AI agent")
     .option("-t, --task <task>", "run a single task non-interactively, then exit")
     .allowExcessArguments(true);
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
 
-  // 1. Load config.
-  let config: Config = getConfig();
+  // Move any legacy data into ~/.openagent/ and tidy stale sessions up front.
+  migrateLegacyData();
+  pruneOldSessions(30);
 
-  // 2. Run the setup wizard if config is empty or incomplete.
+  let config: Config = getConfig();
+  const browserOk = isBrowserAvailable();
+
+  const cleanup = async (): Promise<void> => {
+    await closeBrowser();
+  };
+  process.on("SIGINT", () => {
+    void cleanup().finally(() => process.exit(0));
+  });
+
+  // ---- Headless one-shot mode: run a single task and exit. -------------------
+  if (options.task && options.task.trim().length > 0) {
+    if (!isConfigComplete(config)) {
+      console.error(
+        chalk.red(
+          "No provider is configured yet. Launch Open Agent interactively once to run setup, " +
+            "then use --task.",
+        ),
+      );
+      process.exit(1);
+    }
+    // The workspace is the current directory; reuse/create a project for it.
+    const project = getProjectByPath(process.cwd()) ?? createProject(path.basename(process.cwd()) || "default");
+    touchProject(project.id);
+    setActiveWorkspace(project.path);
+
+    const agentMemory = new AgentMemory();
+    let provider;
+    try {
+      provider = getProvider(config);
+    } catch (err) {
+      console.error(chalk.red(`Failed to initialize provider: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+    const session = new SessionMemory();
+    bindSession(session, project, false);
+    const loop = new AgentLoop(provider, session, agentMemory);
+
+    console.log(chalk.magenta.bold("Open Agent") + chalk.gray(` — provider: ${provider.name}`));
+    console.log(chalk.gray(`workspace: ${getActiveWorkspace()}`));
+    if (!browserOk) {
+      console.log(chalk.gray(BROWSER_UNAVAILABLE_MESSAGE));
+    }
+    console.log("");
+    attachConsoleListeners(loop);
+    await loop.run(options.task.trim());
+    await cleanup();
+    process.exit(0);
+  }
+
+  // ---- Interactive mode requires a TTY for the prompts + UI. -----------------
+  if (!process.stdin.isTTY) {
+    console.error(
+      chalk.yellow(
+        "Open Agent needs an interactive terminal. Run with --task \"...\" for a one-shot, " +
+          "non-interactive task instead.",
+      ),
+    );
+    process.exit(1);
+  }
+
+  // Steps A–C: trust prompt, then known-project detection / new-project setup.
+  const startup = await runStartupFlow();
+  if (startup === null) {
+    process.exit(0);
+  }
+  const { project, loadLastSession } = startup;
+  setActiveWorkspace(project.path);
+
+  // Step D: provider wizard, only when no provider is configured yet.
   if (!isConfigComplete(config)) {
     config = await runSetup();
   }
 
-  // 3. Load AGENT.md (created from the default template if missing).
+  // AgentMemory is constructed AFTER the workspace is set so the project-level
+  // AGENT.md resolves to the current directory.
   const agentMemory = new AgentMemory();
 
-  // 4. Initialize the provider.
   let provider;
   try {
     provider = getProvider(config);
@@ -70,39 +165,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 5. Tool registry is a module-level singleton (see ./tools/index.ts).
-  // 6. Session memory.
   const session = new SessionMemory();
+  bindSession(session, project, loadLastSession);
 
-  // 7. Agent loop.
   const loop = new AgentLoop(provider, session, agentMemory);
 
-  const workspacePath = resolveWorkspacePath(config);
-
-  // Ensure the browser is always cleaned up on exit.
-  const cleanup = async (): Promise<void> => {
-    await closeBrowser();
-  };
-  process.on("SIGINT", () => {
-    void cleanup().finally(() => process.exit(0));
-  });
-
-  // Headless one-shot mode: run a single task and exit.
-  if (options.task && options.task.trim().length > 0) {
-    console.log(chalk.magenta.bold("Open Agent") + chalk.gray(` — provider: ${provider.name}`));
-    console.log(chalk.gray(`workspace: ${workspacePath}\n`));
-    // Persist the headless run under a project (reuse the most recent, or a
-    // "default" one) so the session is saved to disk like interactive runs.
-    const project = listProjects()[0] ?? createProject("default");
-    touchProject(project.id);
-    session.bindPersistence(newSessionFilePath(project.id));
-    attachConsoleListeners(loop);
-    await loop.run(options.task.trim());
-    await cleanup();
-    process.exit(0);
-  }
-
-  // 8. Start the Telegram bridge if configured (interactive mode).
+  // Start the Telegram bridge if configured.
   if (config.telegramToken.trim().length > 0) {
     if (config.telegramChatId.trim().length > 0) {
       const bridge = new TelegramBridge(loop, config.telegramToken, config.telegramChatId);
@@ -114,27 +182,30 @@ async function main(): Promise<void> {
     }
   }
 
-  // 9. Render the terminal UI. Requires an interactive TTY for keyboard input.
-  if (!process.stdin.isTTY) {
+  // Render the Ink UI; fall back to plain console mode if Ink cannot render.
+  try {
+    const app = render(
+      createElement(App, {
+        agentLoop: loop,
+        providerName: provider.name,
+        workspacePath: getActiveWorkspace(),
+        session,
+        project,
+        browserAvailable: browserOk,
+      }),
+    );
+    await app.waitUntilExit();
+  } catch (err) {
     console.error(
       chalk.yellow(
-        "Interactive UI needs a TTY. Run with --task \"...\" for a one-shot, " +
-          "non-interactive task instead.",
+        `Falling back to plain console mode (the terminal UI could not render): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
       ),
     );
-    process.exit(1);
+    attachConsoleListeners(loop);
   }
 
-  const app = render(
-    createElement(App, {
-      agentLoop: loop,
-      providerName: provider.name,
-      workspacePath,
-      session,
-    }),
-  );
-
-  await app.waitUntilExit();
   await cleanup();
   process.exit(0);
 }

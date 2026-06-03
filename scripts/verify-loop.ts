@@ -2,12 +2,13 @@
 // A scripted provider returns the exact JSON a real model would, so we exercise
 // the real parser, corrector, tool dispatch, filesystem tool, and done handling.
 import fs from "fs-extra";
+import os from "node:os";
 import path from "node:path";
 import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
 import type { Provider } from "../src/providers/index.js";
-import { getConfig, resolveWorkspacePath } from "../src/config/index.js";
+import { getConfig, resolveWorkspacePath, setActiveWorkspace } from "../src/config/index.js";
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-test";
@@ -41,6 +42,12 @@ class ScriptedProvider implements Provider {
 }
 
 async function main(): Promise<void> {
+  // Point the active workspace at a temp dir BEFORE constructing AgentMemory so
+  // the agent (and AGENT.md creation) never writes into the repo root.
+  const workspace = path.join(os.tmpdir(), "openagent-verify-loop");
+  fs.ensureDirSync(workspace);
+  setActiveWorkspace(workspace);
+
   const loop = new AgentLoop(new ScriptedProvider(), new SessionMemory(), new AgentMemory());
 
   const events: string[] = [];

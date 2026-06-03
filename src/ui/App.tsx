@@ -5,8 +5,15 @@ import {
   saveConfig,
   getConfig,
   resolveWorkspacePath,
+  setActiveWorkspace as applyWorkspaceRoot,
   type Config,
 } from "../config/index.js";
+import {
+  validateApiKey,
+  validateTelegramToken,
+  validateWorkspacePath,
+  type ValidationResult,
+} from "../config/validate.js";
 import { getProvider, detectClis } from "../providers/index.js";
 import {
   listProjects,
@@ -14,8 +21,8 @@ import {
   touchProject,
   type Project,
 } from "../memory/projects.js";
-import { newSessionFilePath } from "../memory/session-store.js";
-import type { SessionMemory } from "../memory/session.js";
+import { newSessionFilePath, type SessionInfo } from "../memory/session-store.js";
+import type { SessionMemory, Message } from "../memory/session.js";
 import {
   SLASH_COMMANDS,
   matchCommands,
@@ -29,6 +36,7 @@ import { ProjectSelector } from "./ProjectSelector.js";
 import { SettingsScreen } from "./SettingsScreen.js";
 import { ModelPicker } from "./ModelPicker.js";
 import { ProviderPicker } from "./ProviderPicker.js";
+import { SessionsPanel } from "./SessionsPanel.js";
 
 /** A single rendered entry in the chat transcript. */
 export type UIMessage =
@@ -54,14 +62,26 @@ export type AgentStatus =
 type Mode = "projects" | "chat";
 
 /** Which (if any) overlay is open on top of the chat. */
-type Overlay = "none" | "settings" | "model" | "provider" | "tools" | "history" | "help";
+type Overlay =
+  | "none"
+  | "settings"
+  | "model"
+  | "provider"
+  | "tools"
+  | "history"
+  | "sessions"
+  | "help";
 
 interface AppProps {
   agentLoop: AgentLoop;
   providerName: string;
   workspacePath: string;
-  /** Shared session memory (used for /clear, /history, and disk persistence). */
+  /** Shared session memory (used for /clear, /history, /sessions, persistence). */
   session?: SessionMemory;
+  /** The project the agent was launched into (skips the project selector). */
+  project?: Project;
+  /** Whether the Playwright browser tool is available this run. */
+  browserAvailable?: boolean;
   /** When set, skip project selection and immediately run this task (headless/tests). */
   initialTask?: string;
 }
@@ -117,9 +137,52 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
   return partial;
 }
 
-export function App({ agentLoop, providerName, workspacePath, session, initialTask }: AppProps) {
+/** Best-effort render of a stored session's history back into chat messages. */
+function historyToUI(history: Message[]): UIMessage[] {
+  const out: UIMessage[] = [];
+  for (const m of history) {
+    if (m.role === "user") {
+      out.push({ kind: "user", text: m.content });
+    } else if (m.role === "system") {
+      out.push({ kind: "agent", text: m.content });
+    } else if (m.role === "tool_result") {
+      const failed = /\bFAILED\b|^\s*Error:/i.test(m.content);
+      out.push({ kind: "toolResult", tool: "saved", result: m.content, success: !failed });
+    } else {
+      // assistant — its content is the JSON response it emitted.
+      try {
+        const parsed = JSON.parse(m.content) as {
+          thought?: string;
+          message?: string;
+          action?: string;
+        };
+        if (parsed.thought && parsed.thought.length > 0) {
+          out.push({ kind: "thought", text: parsed.thought });
+        }
+        if (parsed.message && parsed.message.length > 0) {
+          const kind =
+            parsed.action === "done" ? "done" : parsed.action === "stuck" ? "stuck" : "agent";
+          out.push({ kind, text: parsed.message });
+        }
+      } catch {
+        out.push({ kind: "agent", text: m.content });
+      }
+    }
+  }
+  return out;
+}
+
+export function App({
+  agentLoop,
+  providerName,
+  workspacePath,
+  session,
+  project,
+  browserAvailable = true,
+  initialTask,
+}: AppProps) {
   const { exit } = useApp();
-  const [mode, setMode] = useState<Mode>(initialTask ? "chat" : "projects");
+  const [mode, setMode] = useState<Mode>(project || initialTask ? "chat" : "projects");
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>({ state: "idle" });
@@ -130,12 +193,35 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
   const [activeProviderName, setActiveProviderName] = useState(providerName);
   const [activeWorkspace, setActiveWorkspace] = useState(workspacePath);
   const [projects, setProjects] = useState<Project[]>(() => listProjects());
-  const [currentProject, setCurrentProject] = useState<Project | null>(null);
+  const [currentProject, setCurrentProject] = useState<Project | null>(project ?? null);
+  // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
+  const [, setResizeTick] = useState(0);
 
   const detectedClis = useMemo(() => detectClis(), []);
 
   const push = useCallback((message: UIMessage) => {
     setMessages((prev) => [...prev, message]);
+  }, []);
+
+  // Re-render on terminal resize (SIGWINCH) so the UI reflows without crashing.
+  useEffect(() => {
+    const onResize = (): void => setResizeTick((t) => t + 1);
+    process.stdout.on("resize", onResize);
+    return () => {
+      process.stdout.off("resize", onResize);
+    };
+  }, []);
+
+  // When launched straight into a project, replay any saved session history.
+  useEffect(() => {
+    if (project && session) {
+      const history = session.getHistory();
+      if (history.length > 0) {
+        setMessages(historyToUI(history));
+      }
+    }
+    // Run exactly once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Subscribe to agent loop events once and translate them into UI state.
@@ -211,20 +297,9 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
 
   // ---- Config changes (settings / model / provider) -------------------------
 
-  const applyConfigChange = useCallback(
-    (raw: Record<string, string>) => {
-      const built = buildPartial(raw);
-      if ("error" in built) {
-        push({ kind: "error", text: `Invalid setting: ${built.error}` });
-        return;
-      }
-      let saved: Config;
-      try {
-        saved = saveConfig(built);
-      } catch (err) {
-        push({ kind: "error", text: `Could not save settings: ${errText(err)}` });
-        return;
-      }
+  /** Reflect a saved config: update local state and hot-swap provider/workspace. */
+  const applySaved = useCallback(
+    (built: Partial<Config>, saved: Config) => {
       setConfig(saved);
 
       const providerFields: (keyof Config)[] = [
@@ -244,6 +319,7 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
         }
       }
       if ("workspacePath" in built) {
+        applyWorkspaceRoot(saved.workspacePath);
         agentLoop.refreshWorkspace();
         setActiveWorkspace(resolveWorkspacePath(saved));
       }
@@ -251,16 +327,81 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
     [agentLoop, push],
   );
 
-  // ---- Project selection ----------------------------------------------------
+  /** Save without validation (used for the model override, which can't be invalid). */
+  const applyConfigChange = useCallback(
+    (raw: Record<string, string>) => {
+      const built = buildPartial(raw);
+      if ("error" in built) {
+        push({ kind: "error", text: `Invalid setting: ${built.error}` });
+        return;
+      }
+      let saved: Config;
+      try {
+        saved = saveConfig(built);
+      } catch (err) {
+        push({ kind: "error", text: `Could not save settings: ${errText(err)}` });
+        return;
+      }
+      applySaved(built, saved);
+    },
+    [applySaved, push],
+  );
+
+  /**
+   * Validate a settings change with live checks (API key / Telegram token /
+   * workspace path), and only persist when everything passes. Returns the
+   * outcome so the editing overlay can show ✅/❌.
+   */
+  const validateAndApply = useCallback(
+    async (raw: Record<string, string>): Promise<ValidationResult> => {
+      const built = buildPartial(raw);
+      if ("error" in built) {
+        return { ok: false, message: `❌ ${built.error}` };
+      }
+      const effective: Config = { ...config, ...built };
+      const okMessages: string[] = [];
+
+      const touchesApi =
+        "apiKey" in built || "apiProvider" in built || "providerMode" in built;
+      if (touchesApi && effective.providerMode === "api" && effective.apiKey.trim().length > 0) {
+        const res = await validateApiKey(effective.apiProvider, effective.apiKey, effective.activeModel);
+        if (!res.ok) return res;
+        okMessages.push(res.message);
+      }
+
+      if ("telegramToken" in built && effective.telegramToken.trim().length > 0) {
+        const res = await validateTelegramToken(effective.telegramToken);
+        if (!res.ok) return res;
+        okMessages.push(res.message);
+      }
+
+      if ("workspacePath" in built) {
+        const res = validateWorkspacePath(effective.workspacePath);
+        if (!res.ok) return res;
+        okMessages.push(res.message);
+      }
+
+      let saved: Config;
+      try {
+        saved = saveConfig(built);
+      } catch (err) {
+        return { ok: false, message: `❌ Could not save: ${errText(err)}` };
+      }
+      applySaved(built, saved);
+      return { ok: true, message: okMessages.length > 0 ? okMessages.join("  ") : "✅ Saved." };
+    },
+    [config, applySaved],
+  );
+
+  // ---- Project selection (fallback path / no launch project) ----------------
 
   const openProject = useCallback(
-    (project: Project) => {
-      touchProject(project.id);
-      // A fresh session file per open; history mirrors to it on every change.
+    (proj: Project) => {
+      touchProject(proj.id);
       if (session) {
-        session.bindPersistence(newSessionFilePath(project.id));
+        session.bindPersistence(newSessionFilePath(proj.id), { projectId: proj.id });
       }
-      setCurrentProject(project);
+      setCurrentProject(proj);
       setMessages([]);
       setStatus({ state: "idle" });
       setMode("chat");
@@ -271,8 +412,8 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
 
   const createAndOpen = useCallback(
     (name: string) => {
-      const project = createProject(name);
-      openProject(project);
+      const proj = createProject(name);
+      openProject(proj);
     },
     [openProject],
   );
@@ -290,6 +431,9 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
           break;
         case "/history":
           setOverlay("history");
+          break;
+        case "/sessions":
+          setOverlay("sessions");
           break;
         case "/model":
           setOverlay("model");
@@ -330,12 +474,31 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
   );
 
   const onProviderSubmit = useCallback(
-    (raw: Record<string, string>) => {
-      applyConfigChange(raw);
-      setOverlay("none");
-      push({ kind: "agent", text: "Provider switched. Conversation preserved." });
+    async (raw: Record<string, string>): Promise<ValidationResult> => {
+      const res = await validateAndApply(raw);
+      if (res.ok) {
+        setOverlay("none");
+        push({ kind: "agent", text: "Provider switched. Conversation preserved." });
+      }
+      return res;
     },
-    [applyConfigChange, push],
+    [validateAndApply, push],
+  );
+
+  const onLoadSession = useCallback(
+    (info: SessionInfo) => {
+      if (session) {
+        session.loadFrom(info.path);
+        setMessages(historyToUI(session.getHistory()));
+      }
+      setOverlay("none");
+      setStatus({ state: "idle" });
+      push({
+        kind: "agent",
+        text: `Loaded session from ${info.when.toLocaleString()} (${info.count} message${info.count === 1 ? "" : "s"}).`,
+      });
+    },
+    [session, push],
   );
 
   // ---- Input handling -------------------------------------------------------
@@ -442,7 +605,7 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
             <SettingsScreen
               config={config}
               detectedClis={detectedClis}
-              onSave={applyConfigChange}
+              onSave={validateAndApply}
               onClose={() => setOverlay("none")}
             />
           ) : null}
@@ -464,9 +627,23 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
             />
           ) : null}
 
-          {overlay === "tools" ? <ToolsPanel /> : null}
+          {overlay === "sessions" ? (
+            <SessionsPanel
+              projectId={currentProject?.id ?? null}
+              onLoad={onLoadSession}
+              onClose={() => setOverlay("none")}
+            />
+          ) : null}
+
+          {overlay === "tools" ? <ToolsPanel browserAvailable={browserAvailable} /> : null}
           {overlay === "history" ? <HistoryPanel session={session} /> : null}
           {overlay === "help" ? <HelpPanel /> : null}
+
+          {!browserAvailable && overlay === "none" ? (
+            <Text color="gray" dimColor>
+              Browser tool unavailable — run npx playwright install chromium to enable
+            </Text>
+          ) : null}
         </>
       )}
 
@@ -482,12 +659,21 @@ export function App({ agentLoop, providerName, workspacePath, session, initialTa
 
 // ---- Read-only info panels --------------------------------------------------
 
+interface ToolsPanelProps {
+  browserAvailable: boolean;
+}
+
 /** Static reference of the agent's available tools (/tools). */
-function ToolsPanel() {
+function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
   const tools: Array<{ name: string; detail: string }> = [
-    { name: "shell", detail: "run shell commands inside the workspace (30s timeout)" },
+    { name: "shell", detail: "run shell commands in the working directory (30s timeout)" },
     { name: "filesystem", detail: "read / write / list / delete / mkdir (workspace-relative)" },
-    { name: "browser", detail: "navigate / click / type / screenshot / extractText / getHtml (headless Chromium)" },
+    {
+      name: "browser",
+      detail: browserAvailable
+        ? "navigate / click / type / screenshot / extractText / getHtml (headless Chromium)"
+        : "unavailable — run npx playwright install chromium to enable",
+    },
   ];
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
@@ -549,7 +735,13 @@ function HistoryPanel({ session }: HistoryPanelProps) {
           const firstLine = message.content.split(/\r?\n/)[0] ?? "";
           const preview = firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine;
           const color =
-            message.role === "user" ? "white" : message.role === "assistant" ? "green" : "gray";
+            message.role === "user"
+              ? "white"
+              : message.role === "assistant"
+                ? "green"
+                : message.role === "system"
+                  ? "magenta"
+                  : "gray";
           return (
             <Box key={index}>
               <Text color={color} bold>

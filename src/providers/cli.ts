@@ -1,39 +1,64 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { Provider } from "./index.js";
+import { extractJsonObject } from "../util/json.js";
 
 /** Hard ceiling on a single CLI invocation, in milliseconds. */
 const CALL_TIMEOUT_MS = 60_000;
 
-// Matches ANSI/VT100 escape sequences (colors, cursor moves, etc.) so CLI
-// output can be parsed as plain text/JSON. Control chars are intentional.
-// eslint-disable-next-line no-control-regex
-const ANSI_PATTERN = /[][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_PATTERN, "");
-}
+// ANSI/VT100 escape sequences (colors, cursor moves, etc.). Built from an
+// escape-sequence string so the source file contains no literal control bytes.
+const ANSI_PATTERN = new RegExp(
+  "[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))",
+  "g",
+);
+
+// Stray C0/C1 control characters to drop, keeping tab/newline/carriage-return
+// and dropping DEL. Built from a string literal so the source stays pure ASCII.
+const CONTROL_PATTERN = new RegExp(
+  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
+  "g",
+);
 
 /**
- * The agent loop expects the model's reply to contain a JSON object matching
- * { thought, action, params, message }. Some CLIs (e.g. gemini) ignore that
- * instruction and print plain prose. If the cleaned output contains no JSON
- * object at all, wrap the whole text as a terminal "done" response so the loop
- * can surface it to the user instead of failing to parse. If it looks like it
- * contains JSON (has a "{" and a "}"), pass it through untouched and let the
- * loop's balanced-brace extractor handle it.
+ * Strip ANSI escape sequences AND stray control characters (keeping tab,
+ * newline, carriage return) so noisy terminal output parses cleanly as text/JSON.
  */
-function ensureJsonResponse(cleaned: string): string {
-  if (cleaned.includes("{") && cleaned.includes("}")) {
-    return cleaned;
-  }
-  const message = cleaned.length > 0 ? cleaned : "(the CLI returned no output)";
+function cleanOutput(text: string): string {
+  return text.replace(ANSI_PATTERN, "").replace(CONTROL_PATTERN, "");
+}
+
+/** Patterns that indicate the CLI needs the user to authenticate / log in. */
+const AUTH_PATTERNS: RegExp[] = [
+  /not logged in/i,
+  /please (log[ -]?in|login|sign in|authenticate)/i,
+  /requires? (authentication|login|sign[ -]?in)/i,
+  /\bunauthorized\b/i,
+  /\b401\b/,
+  /invalid api key/i,
+  /no api key/i,
+  /api key (is )?(not set|missing|required)/i,
+  /set [A-Z0-9_]*_API_KEY/i,
+  /run .{0,40}(login|auth)/i,
+  /authentication (failed|required|error)/i,
+];
+
+function looksLikeAuthError(text: string): boolean {
+  return AUTH_PATTERNS.some((re) => re.test(text));
+}
+
+/** Wrap arbitrary text as a terminal "done" response the agent loop can read. */
+function wrapDone(message: string): string {
   return JSON.stringify({ thought: "", action: "done", params: {}, message });
 }
 
+/** Wrap a problem as a "stuck" response so the loop surfaces it and stops cleanly. */
+function wrapStuck(message: string): string {
+  return JSON.stringify({ thought: "", action: "stuck", params: {}, message });
+}
+
 /**
- * Discover the first installed ollama model by parsing `ollama list`. The
- * command prints a header row followed by one row per model; the model name is
- * the first whitespace-delimited token of the first data row. Falls back to
- * "llama3" if listing fails or no model is installed.
+ * Discover the first installed ollama model by parsing `ollama list`. Falls back
+ * to "llama3" if listing fails or no model is installed.
  */
 function detectOllamaModel(): string {
   try {
@@ -48,7 +73,6 @@ function detectOllamaModel(): string {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
-    // Drop the header row (starts with "NAME") if present.
     const dataLines = lines.filter((line) => !/^NAME\b/i.test(line));
     const first = dataLines[0];
     if (!first) {
@@ -65,39 +89,39 @@ function detectOllamaModel(): string {
  * Build the argv for a given CLI. The full prompt is passed as a discrete
  * argument (never interpolated into a shell string) so quoting and shell
  * metacharacters in the prompt cannot break the invocation or inject commands.
- * When `model` is non-empty the per-CLI model flag is injected; otherwise the
- * CLI's own default model is used (ollama auto-detects an installed model).
+ * When `model` is non-empty the per-CLI model flag is injected.
  */
 function buildArgs(cli: string, prompt: string, model: string): string[] {
+  const m = model.trim();
   switch (cli) {
     case "gemini":
-      return model ? ["-m", model, "-p", prompt] : ["-p", prompt];
+      return m ? ["-p", prompt, "-m", m] : ["-p", prompt];
     case "claude":
-      return model ? ["--model", model, "-p", prompt] : ["-p", prompt];
+      return m ? ["-p", prompt, "--model", m] : ["-p", prompt];
     case "codex":
-      // No stable model-selection flag — pass the prompt positionally.
-      return [prompt];
+      // Run non-interactively / unattended.
+      return ["--full-auto", prompt];
     case "aider":
-      return model
-        ? ["--model", model, "--message", prompt, "--no-auto-commits"]
-        : ["--message", prompt, "--no-auto-commits"];
+      return m
+        ? ["--model", m, "--message", prompt, "--yes", "--no-auto-commits"]
+        : ["--message", prompt, "--yes", "--no-auto-commits"];
     case "goose":
       return ["run", "--text", prompt];
     case "ollama":
       // An explicit model overrides the auto-detected first installed model.
-      return ["run", model.trim() || detectOllamaModel(), prompt];
+      return ["run", m || detectOllamaModel(), prompt];
     default:
-      // Unknown CLIs receive the prompt as a single positional argument — the
-      // most common convention — rather than failing outright.
+      // Unknown CLIs receive the prompt as a single positional argument.
       return [prompt];
   }
 }
 
 /**
- * Drives a locally-installed AI CLI as a child process. Each turn the agent
- * loop hands over one fully-assembled prompt string and gets back the CLI's
- * stdout. Errors (nonzero exit, timeout, spawn failure) are returned as text
- * so the agent can read and reason about them rather than crashing the loop.
+ * Drives a locally-installed AI CLI as a child process. Each turn the agent loop
+ * hands over one fully-assembled prompt string and gets back a response the loop
+ * can always parse: a JSON object extracted from the CLI's output, plain prose
+ * wrapped as "done", or a "stuck" response describing a timeout/crash/auth issue.
+ * Nothing here throws — every failure mode is converted into a readable result.
  */
 export class CLIProvider implements Provider {
   private readonly cliName: string;
@@ -136,13 +160,15 @@ export class CLIProvider implements Provider {
       let stderr = "";
 
       const timer = setTimeout(() => {
+        // Hard timeout: kill the process and return a clean "stuck" result rather
+        // than letting a hung CLI block the loop.
         child.kill("SIGKILL");
-        const outText = stripAnsi(stdout).trim();
-        const errText = stripAnsi(stderr).trim();
+        const partial = cleanOutput(stdout).trim();
         finish(
-          `Error: "${cli}" timed out after ${CALL_TIMEOUT_MS / 1000}s.` +
-            (outText ? `\nPartial stdout:\n${outText}` : "") +
-            (errText ? `\nPartial stderr:\n${errText}` : "")
+          wrapStuck(
+            `The CLI "${cli}" timed out after ${CALL_TIMEOUT_MS / 1000}s and was terminated.` +
+              (partial ? ` Partial output: ${partial.slice(0, 500)}` : ""),
+          ),
         );
       }, CALL_TIMEOUT_MS);
 
@@ -155,32 +181,66 @@ export class CLIProvider implements Provider {
 
       child.on("error", (err: Error) => {
         clearTimeout(timer);
-        finish(`Error: failed to spawn "${cli}": ${err.message}`);
+        finish(
+          wrapStuck(
+            `Failed to start the CLI "${cli}": ${err.message}. ` +
+              `Make sure it is installed and available on your PATH.`,
+          ),
+        );
       });
 
       child.on("close", (code: number | null) => {
         clearTimeout(timer);
-        if (code === 0) {
-          // Clean ANSI escape codes (CLIs like gemini colorize output) before
-          // parsing, then wrap plain prose so the agent loop never crashes on
-          // a non-JSON reply.
-          const cleaned = stripAnsi(stdout).trim();
-          finish(ensureJsonResponse(cleaned));
+        const out = cleanOutput(stdout).trim();
+        const err = cleanOutput(stderr).trim();
+        const combined = `${out}\n${err}`.trim();
+
+        // Authentication problems can't be fixed mid-loop — tell the user how.
+        if (looksLikeAuthError(combined)) {
+          finish(
+            wrapStuck(
+              `This CLI requires authentication. Run ${cli} once manually to log in, ` +
+                `then restart Open Agent.`,
+            ),
+          );
           return;
         }
-        // Nonzero exit: surface everything the CLI emitted (ANSI-stripped so it
-        // is readable) so the agent's corrector can diagnose and retry instead
-        // of guessing. Left as raw error text — not wrapped as a "done".
-        const errText = stripAnsi(stderr).trim();
-        const outText = stripAnsi(stdout).trim();
-        const combined = [
-          `Error: "${cli}" exited with code ${code ?? "null"}.`,
-          errText ? `stderr:\n${errText}` : "",
-          outText ? `stdout:\n${outText}` : "",
-        ]
-          .filter((part) => part.length > 0)
-          .join("\n");
-        finish(combined);
+
+        // If the output contains a JSON object anywhere, extract and use it.
+        const json = extractJsonObject(out) ?? extractJsonObject(combined);
+        if (json) {
+          finish(json);
+          return;
+        }
+
+        if (code === 0) {
+          // Clean exit but plain prose — wrap it so the loop never crashes.
+          finish(wrapDone(out.length > 0 ? out : "(the CLI returned no output)"));
+          return;
+        }
+
+        // Non-zero exit with no output at all → treat as a crash.
+        if (out.length === 0 && err.length === 0) {
+          finish(
+            wrapStuck(
+              `The CLI "${cli}" exited with code ${code ?? "null"} and produced no output. ` +
+                `It may have crashed — check that "${cli}" runs correctly.`,
+            ),
+          );
+          return;
+        }
+
+        // Non-zero exit WITH output (but no JSON): surface it as readable error
+        // text so the agent's corrector can diagnose and retry.
+        finish(
+          [
+            `Error: "${cli}" exited with code ${code ?? "null"}.`,
+            err ? `stderr:\n${err}` : "",
+            out ? `stdout:\n${out}` : "",
+          ]
+            .filter((part) => part.length > 0)
+            .join("\n"),
+        );
       });
     });
   }
