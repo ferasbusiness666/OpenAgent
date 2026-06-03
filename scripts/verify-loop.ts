@@ -17,7 +17,13 @@ class ScriptedProvider implements Provider {
   async complete(_prompt: string): Promise<string> {
     this.calls += 1;
     if (this.calls === 1) {
-      // First turn: write the file. Intentionally wrapped in prose + fences to
+      // First call is now the PLANNING call — return a JSON phase array.
+      return JSON.stringify([
+        { title: "Create the file", description: "Write hello.txt with the content." },
+      ]);
+    }
+    if (this.calls === 2) {
+      // Second turn: write the file. Intentionally wrapped in prose + fences to
       // exercise the JSON extractor's tolerance.
       return [
         "Sure, here is my next step:",
@@ -31,7 +37,7 @@ class ScriptedProvider implements Provider {
         "```",
       ].join("\n");
     }
-    // Second turn: the write succeeded, so finish.
+    // Third turn: the write succeeded, so finish.
     return JSON.stringify({
       thought: "The file was written successfully. Task complete.",
       action: "done",

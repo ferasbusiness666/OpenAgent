@@ -1,6 +1,6 @@
 import type { Provider } from "./index.js";
 
-export type ApiProviderName = "openai" | "anthropic" | "google";
+export type ApiProviderName = "openai" | "anthropic" | "google" | "openrouter";
 
 /** Minimal shapes of the response payloads we read from each provider. */
 interface AnthropicResponse {
@@ -47,6 +47,8 @@ export class APIProvider implements Provider {
         return this.completeOpenAI(prompt);
       case "google":
         return this.completeGoogle(prompt);
+      case "openrouter":
+        return this.completeOpenRouter(prompt);
       default: {
         // Exhaustiveness guard — unreachable under the typed union.
         const never: never = this.apiProvider;
@@ -99,30 +101,59 @@ export class APIProvider implements Provider {
     return text;
   }
 
-  private async completeOpenAI(prompt: string): Promise<string> {
-    const response = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: this.model.trim() || "gpt-4o",
-          messages: [{ role: "user", content: prompt }],
-        }),
-      }
-    );
+  /**
+   * Shared implementation for OpenAI-compatible chat completions endpoints.
+   * Both OpenAI and OpenRouter use the same request/response format; they differ
+   * only in URL, optional extra headers, and the default model id.
+   */
+  private async completeOpenAICompatible(
+    prompt: string,
+    options: {
+      url: string;
+      extraHeaders?: Record<string, string>;
+      defaultModel: string;
+    }
+  ): Promise<string> {
+    const { url, extraHeaders = {}, defaultModel } = options;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "content-type": "application/json",
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        model: this.model.trim() || defaultModel,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
 
     const data = (await this.readJson(response)) as OpenAIResponse;
     const text = data.choices?.[0]?.message?.content;
     if (typeof text !== "string") {
       throw new Error(
-        `OpenAI response missing choices[0].message.content: ${JSON.stringify(data)}`
+        `${url} response missing choices[0].message.content: ${JSON.stringify(data)}`
       );
     }
     return text;
+  }
+
+  private async completeOpenAI(prompt: string): Promise<string> {
+    return this.completeOpenAICompatible(prompt, {
+      url: "https://api.openai.com/v1/chat/completions",
+      defaultModel: "gpt-4o",
+    });
+  }
+
+  private async completeOpenRouter(prompt: string): Promise<string> {
+    return this.completeOpenAICompatible(prompt, {
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      extraHeaders: {
+        "HTTP-Referer": "https://github.com/ferasbusiness666/OpenAgent",
+        "X-Title": "OpenAgent",
+      },
+      defaultModel: "openai/gpt-4o",
+    });
   }
 
   private async completeGoogle(prompt: string): Promise<string> {

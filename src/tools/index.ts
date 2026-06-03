@@ -3,6 +3,7 @@ import type { ShellResult } from "./shell.js";
 import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
+import { getConnector } from "../connectors/index.js";
 
 export { ShellTool } from "./shell.js";
 export type { ShellResult } from "./shell.js";
@@ -58,8 +59,18 @@ class ToolRegistry {
 
 const registry = new ToolRegistry();
 
+/** GitHub operations the registry can dispatch. */
+export type GitHubOperation = "listRepos" | "readFile" | "listIssues";
+
+/** Validated parameter shape for the github tool. */
+export interface GitHubParams {
+  operation: GitHubOperation;
+  repo?: string;
+  path?: string;
+}
+
 /** Allowed tool names. */
-const TOOL_NAMES = ["shell", "filesystem", "browser"] as const;
+const TOOL_NAMES = ["shell", "filesystem", "browser", "github"] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 
 function isToolName(value: string): value is ToolName {
@@ -153,6 +164,45 @@ function parseBrowserParams(
   return result;
 }
 
+const GITHUB_OPS: readonly GitHubOperation[] = [
+  "listRepos",
+  "readFile",
+  "listIssues",
+];
+
+function parseGithubParams(
+  params: Record<string, unknown>,
+): GitHubParams | string {
+  const operation = asString(params.operation);
+  if (
+    operation === null ||
+    !(GITHUB_OPS as readonly string[]).includes(operation)
+  ) {
+    return `github requires "operation" to be one of: ${GITHUB_OPS.join(", ")}.`;
+  }
+  const op = operation as GitHubOperation;
+
+  const repo = asString(params.repo) ?? undefined;
+  const path = asString(params.path) ?? undefined;
+
+  if (op === "readFile") {
+    if (repo === undefined || repo.trim().length === 0) {
+      return 'github "readFile" requires a non-empty string "repo" parameter (format: owner/name).';
+    }
+    if (path === undefined || path.trim().length === 0) {
+      return 'github "readFile" requires a non-empty string "path" parameter.';
+    }
+  }
+
+  if (op === "listIssues") {
+    if (repo === undefined || repo.trim().length === 0) {
+      return 'github "listIssues" requires a non-empty string "repo" parameter (format: owner/name).';
+    }
+  }
+
+  return { operation: op, repo, path };
+}
+
 // ---- Dispatch --------------------------------------------------------------
 
 function formatShellResult(r: ShellResult): string {
@@ -234,6 +284,31 @@ export async function executeTool(
       }
       const result = await dispatchFilesystem(parsed);
       return { success: true, result };
+    }
+
+    if (name === "github") {
+      const parsed = parseGithubParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const connector = getConnector("github");
+      if (connector === undefined) {
+        return {
+          success: false,
+          result: "",
+          error: 'GitHub connector is not registered.',
+        };
+      }
+      const raw = await connector.executeAction(parsed.operation, {
+        repo: parsed.repo,
+        path: parsed.path,
+      });
+      let serialized = JSON.stringify(raw, null, 2);
+      // Cap very long output to ~4000 chars to keep context manageable.
+      if (serialized.length > 4000) {
+        serialized = serialized.slice(0, 4000) + "\n... (output truncated)";
+      }
+      return { success: true, result: serialized };
     }
 
     // name === "browser"

@@ -28,12 +28,15 @@ import {
 } from "./memory/session-store.js";
 import { getProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
+import { Planner } from "./agent/plan.js";
+import { SessionManager, type AgentState } from "./memory/session-manager.js";
 import { closeBrowser, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./tools/index.js";
 import { TelegramBridge } from "./telegram/bridge.js";
 import { App } from "./ui/App.js";
 
 interface CliOptions {
   task?: string;
+  resume?: string;
 }
 
 /** Attach plain-text console listeners to the loop (headless / fallback mode). */
@@ -70,6 +73,7 @@ async function main(): Promise<void> {
     .name("openagent")
     .description("Open Agent — an autonomous local AI agent")
     .option("-t, --task <task>", "run a single task non-interactively, then exit")
+    .option("-r, --resume <sessionId>", "resume a previously saved session by id")
     .allowExcessArguments(true);
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
@@ -80,6 +84,21 @@ async function main(): Promise<void> {
 
   let config: Config = getConfig();
   const browserOk = isBrowserAvailable();
+
+  // One SessionManager drives the resumable AgentState files for this process.
+  const sessionManager = new SessionManager();
+  // Resolve the session id up front: resume id when provided, else a fresh one.
+  const resumeId =
+    typeof options.resume === "string" && options.resume.trim().length > 0
+      ? options.resume.trim()
+      : undefined;
+  const resumedState: AgentState | null = resumeId ? sessionManager.load(resumeId) : null;
+  if (resumeId && resumedState === null) {
+    console.error(
+      chalk.yellow(`Could not resume session "${resumeId}" — starting a fresh session.`),
+    );
+  }
+  const sessionId = resumedState?.sessionId ?? resumeId ?? sessionManager.newSessionId();
 
   const cleanup = async (): Promise<void> => {
     await closeBrowser();
@@ -114,7 +133,22 @@ async function main(): Promise<void> {
     }
     const session = new SessionMemory();
     bindSession(session, project, false);
-    const loop = new AgentLoop(provider, session, agentMemory);
+    if (resumedState) {
+      session.replaceHistory(resumedState.history);
+    }
+    const loop = new AgentLoop(provider, session, agentMemory, {
+      sessionManager,
+      sessionId,
+      goal: resumedState?.goal,
+      phases: resumedState?.phases,
+    });
+    if (resumedState) {
+      console.log(
+        chalk.gray(
+          `Resumed session ${resumedState.sessionId} — ${resumedState.history.length} messages, ${resumedState.phases.length} phases.`,
+        ),
+      );
+    }
 
     console.log(chalk.magenta.bold("Open Agent") + chalk.gray(` — provider: ${provider.name}`));
     console.log(chalk.gray(`workspace: ${getActiveWorkspace()}`));
@@ -167,8 +201,23 @@ async function main(): Promise<void> {
 
   const session = new SessionMemory();
   bindSession(session, project, loadLastSession);
+  if (resumedState) {
+    session.replaceHistory(resumedState.history);
+  }
 
-  const loop = new AgentLoop(provider, session, agentMemory);
+  const loop = new AgentLoop(provider, session, agentMemory, {
+    sessionManager,
+    sessionId,
+    goal: resumedState?.goal,
+    phases: resumedState?.phases,
+  });
+  if (resumedState) {
+    console.log(
+      chalk.gray(
+        `Resumed session ${resumedState.sessionId} — ${resumedState.history.length} messages, ${resumedState.phases.length} phases.`,
+      ),
+    );
+  }
 
   // Start the Telegram bridge if configured.
   if (config.telegramToken.trim().length > 0) {

@@ -101,6 +101,15 @@ export class SessionMemory {
   }
 
   /**
+   * Replace the entire history with a copy of `messages` and mirror it to disk.
+   * Used to seed a resumed session from a persisted AgentState snapshot.
+   */
+  replaceHistory(messages: Message[]): void {
+    this.history = messages.map((m) => ({ ...m }));
+    this.persist();
+  }
+
+  /**
    * Return the last `n` messages as a copy. Non-positive `n` yields an empty
    * array; values larger than the history simply return the whole history.
    */

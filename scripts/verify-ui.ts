@@ -15,6 +15,12 @@ class ScriptedProvider implements Provider {
   async complete(_prompt: string): Promise<string> {
     this.calls += 1;
     if (this.calls === 1) {
+      // First call is now the PLANNING call — return a JSON phase array.
+      return JSON.stringify([
+        { title: "Inspect the workspace", description: "List the workspace contents." },
+      ]);
+    }
+    if (this.calls === 2) {
       return JSON.stringify({
         thought: "Listing the workspace first.",
         action: "filesystem",

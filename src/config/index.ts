@@ -18,7 +18,7 @@ export const ConfigSchema = z.object({
   providerMode: z.enum(["cli", "api"]).default("cli"),
   activeCliName: z.string().default(""),
   apiKey: z.string().default(""),
-  apiProvider: z.enum(["openai", "anthropic", "google"]).default("anthropic"),
+  apiProvider: z.enum(["openai", "anthropic", "google", "openrouter"]).default("anthropic"),
   activeModel: z.string().default(""),
   telegramToken: z.string().default(""),
   telegramChatId: z.string().default(""),

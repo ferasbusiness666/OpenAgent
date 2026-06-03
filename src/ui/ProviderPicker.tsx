@@ -14,7 +14,7 @@ interface ProviderPickerProps {
 type Step = "mode" | "cli" | "apiProvider" | "apiKey";
 
 const MODES = ["cli", "api"] as const;
-const API_PROVIDERS = ["openai", "anthropic", "google"] as const;
+const API_PROVIDERS = ["openai", "anthropic", "google", "openrouter"] as const;
 
 /** Color the result line by its leading status glyph. */
 function statusColor(message: string): string {

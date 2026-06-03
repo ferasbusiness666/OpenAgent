@@ -7,9 +7,12 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 ## Features
 
 - **Autonomous loop** — ReAct-style plan → act → observe → correct until the task is done.
+- **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
+- **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
 - **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser.
-- **Provider-agnostic** — drive it with a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) or a hosted API (OpenAI, Anthropic, Google). The CLI bridge is hardened against hangs, crashes, and noisy output.
+- **GitHub connector** — read-only GitHub access (list repos, read file contents, list issues) via the `github` tool, authenticated with the `GITHUB_TOKEN` environment variable.
+- **Provider-agnostic** — drive it with a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) or a hosted API (OpenAI, Anthropic, Google, OpenRouter). The CLI bridge is hardened against hangs, crashes, and noisy output.
 - **Projects & saved sessions** — each directory you launch in is remembered as a project; every message is saved to a per-project session file on disk, and you can reopen a recent one with `/sessions`.
 - **Hot provider/model switching** — change provider or model mid-conversation (`/provider`, `/model`) without losing any history.
 - **Slash commands** — `/settings`, `/tools`, `/model`, `/provider`, `/history`, `/sessions`, `/clear`, `/help` run inline from the chat.
@@ -89,8 +92,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `workspacePath` | Optional override for the agent's working folder. Empty (`""`, the default) means use the directory `openagent` was launched in. |
 | `providerMode` | `"cli"` or `"api"`. |
 | `activeCliName` | Detected CLI to drive (cli mode). |
-| `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google"` (api mode). |
-| `activeModel` | Model name/id to use (e.g. `gpt-4o`, `gemini-2.0-flash`, `llama3`); blank = provider default. |
+| `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "openrouter"` (api mode). OpenRouter uses the OpenAI-compatible API at `https://openrouter.ai/api/v1`. |
+| `activeModel` | Model name/id to use (e.g. `gpt-4o`, `gemini-2.0-flash`, `llama3`, or an OpenRouter id like `openai/gpt-4o`); blank = provider default. |
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
 
 You can edit all of these live from inside the app with `/settings`. Values are **validated before they are saved** — an invalid value is rejected and not written:

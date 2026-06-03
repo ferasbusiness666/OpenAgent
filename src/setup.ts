@@ -8,7 +8,7 @@ import { saveConfig, type Config } from "./config/index.js";
  * setup wizard is fully self-contained and can run before the UI boots.
  */
 const KNOWN_CLIS = ["gemini", "claude", "codex", "aider", "goose", "ollama"] as const;
-const API_PROVIDERS = ["openai", "anthropic", "google"] as const;
+const API_PROVIDERS = ["openai", "anthropic", "google", "openrouter"] as const;
 
 /** Check whether a command exists on PATH using `where` (win) / `which` (unix). */
 function commandExists(cmd: string): boolean {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Box, Text, useInput, useApp } from "ink";
 import type { AgentLoop } from "../agent/loop.js";
+import type { Phase } from "../agent/plan.js";
 import {
   saveConfig,
   getConfig,
@@ -124,8 +125,13 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
         partial.providerMode = value;
         break;
       case "apiProvider":
-        if (value !== "openai" && value !== "anthropic" && value !== "google") {
-          return { error: "apiProvider must be openai, anthropic, or google." };
+        if (
+          value !== "openai" &&
+          value !== "anthropic" &&
+          value !== "google" &&
+          value !== "openrouter"
+        ) {
+          return { error: "apiProvider must be openai, anthropic, google, or openrouter." };
         }
         partial.apiProvider = value;
         break;
@@ -194,6 +200,9 @@ export function App({
   const [activeWorkspace, setActiveWorkspace] = useState(workspacePath);
   const [projects, setProjects] = useState<Project[]>(() => listProjects());
   const [currentProject, setCurrentProject] = useState<Project | null>(project ?? null);
+  // The agent's multi-phase plan (populated by the loop's plan/phaseUpdate events;
+  // seeded from a resumed session via the loop's current plan).
+  const [phases, setPhases] = useState<Phase[]>(() => agentLoop.plan);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
   const [, setResizeTick] = useState(0);
 
@@ -253,6 +262,8 @@ export function App({
       setStatus({ state: "error" });
       setBusy(false);
     };
+    const onPlan = (next: Phase[]) => setPhases(next);
+    const onPhaseUpdate = (next: Phase[]) => setPhases(next);
 
     agentLoop.on("thought", onThought);
     agentLoop.on("toolCall", onToolCall);
@@ -261,6 +272,8 @@ export function App({
     agentLoop.on("done", onDone);
     agentLoop.on("stuck", onStuck);
     agentLoop.on("error", onError);
+    agentLoop.on("plan", onPlan);
+    agentLoop.on("phaseUpdate", onPhaseUpdate);
 
     return () => {
       agentLoop.off("thought", onThought);
@@ -270,6 +283,8 @@ export function App({
       agentLoop.off("done", onDone);
       agentLoop.off("stuck", onStuck);
       agentLoop.off("error", onError);
+      agentLoop.off("plan", onPlan);
+      agentLoop.off("phaseUpdate", onPhaseUpdate);
     };
   }, [agentLoop, push]);
 
@@ -403,6 +418,7 @@ export function App({
       }
       setCurrentProject(proj);
       setMessages([]);
+      setPhases([]);
       setStatus({ state: "idle" });
       setMode("chat");
       setProjects(listProjects());
@@ -447,6 +463,7 @@ export function App({
         case "/clear":
           session?.clear();
           setMessages([{ kind: "agent", text: "Conversation cleared. Same project, fresh start." }]);
+          setPhases([]);
           setStatus({ state: "idle" });
           break;
         default:
@@ -581,6 +598,8 @@ export function App({
         <>
           <ChatView messages={messages} />
 
+          {phases.length > 0 ? <PlanView phases={phases} /> : null}
+
           {overlay === "none" ? (
             <>
               {showMenu ? <CommandMenu filter={input} /> : null}
@@ -653,6 +672,52 @@ export function App({
         workspacePath={activeWorkspace}
         projectName={currentProject?.name}
       />
+    </Box>
+  );
+}
+
+// ---- Plan view --------------------------------------------------------------
+
+interface PlanViewProps {
+  phases: Phase[];
+}
+
+/** Glyph + color for a phase status. */
+function phaseGlyph(status: Phase["status"]): { glyph: string; color: string } {
+  switch (status) {
+    case "completed":
+      return { glyph: "✓", color: "green" };
+    case "in_progress":
+      return { glyph: "▶", color: "yellow" };
+    case "failed":
+      return { glyph: "✗", color: "red" };
+    default:
+      return { glyph: "○", color: "gray" };
+  }
+}
+
+/** Compact, live-updating view of the agent's multi-phase plan. */
+function PlanView({ phases }: PlanViewProps) {
+  const done = phases.filter((p) => p.status === "completed").length;
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1} marginTop={1}>
+      <Text color="blue" bold>
+        Plan ({done}/{phases.length} complete)
+      </Text>
+      {phases.map((phase) => {
+        const { glyph, color } = phaseGlyph(phase.status);
+        return (
+          <Box key={phase.id}>
+            <Text color={color}>
+              {"  "}
+              {glyph} {phase.id}. {phase.title}
+            </Text>
+            {phase.findings.length > 0 ? (
+              <Text color="gray"> — {phase.findings[phase.findings.length - 1]}</Text>
+            ) : null}
+          </Box>
+        );
+      })}
     </Box>
   );
 }

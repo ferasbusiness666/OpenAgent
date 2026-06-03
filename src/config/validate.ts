@@ -57,6 +57,15 @@ export async function validateApiKey(
         method: "GET",
         headers: { Authorization: `Bearer ${key}` },
       });
+    } else if (provider === "openrouter") {
+      response = await fetchWithTimeout("https://openrouter.ai/api/v1/auth/key", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "HTTP-Referer": "https://github.com/ferasbusiness666/OpenAgent",
+          "X-Title": "OpenAgent",
+        },
+      });
     } else {
       response = await fetchWithTimeout(
         `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,

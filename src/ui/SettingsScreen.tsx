@@ -25,7 +25,7 @@ const FIELDS: Field[] = [
   { key: "workspacePath", label: "Workspace path", type: "text" },
   { key: "providerMode", label: "Provider mode", type: "enum", options: ["cli", "api"] },
   { key: "activeCliName", label: "Active CLI", type: "text" },
-  { key: "apiProvider", label: "API provider", type: "enum", options: ["openai", "anthropic", "google"] },
+  { key: "apiProvider", label: "API provider", type: "enum", options: ["openai", "anthropic", "google", "openrouter"] },
   { key: "apiKey", label: "API key", type: "secret" },
   { key: "activeModel", label: "Active model", type: "text" },
   { key: "telegramToken", label: "Telegram token", type: "secret" },
