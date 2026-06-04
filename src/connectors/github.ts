@@ -98,16 +98,18 @@ type GitHubAction = (typeof VALID_ACTIONS)[number];
  * Returns `undefined` when the value cannot be interpreted as a valid number.
  */
 function coerceNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+  let n: number | undefined;
+  if (typeof value === "number") {
+    n = value;
+  } else if (typeof value === "string" && value.trim().length > 0) {
+    n = Number(value);
   }
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
+  // Issue/PR numbers are positive integers; a float or negative would be
+  // interpolated into an API path and 404, so reject it up front.
+  if (n === undefined || !Number.isInteger(n) || n <= 0) {
+    return undefined;
   }
-  return undefined;
+  return n;
 }
 
 /**

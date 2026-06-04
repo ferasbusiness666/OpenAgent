@@ -514,9 +514,6 @@ export async function executeTool(
     }
 
     if (name === "research") {
-      if (!isBrowserAvailable()) {
-        return { success: false, result: "", error: BROWSER_UNAVAILABLE_MESSAGE };
-      }
       const parsed = parseResearchParams(safeParams);
       if (typeof parsed === "string") {
         return { success: false, result: "", error: parsed };

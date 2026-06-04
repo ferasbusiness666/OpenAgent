@@ -22,6 +22,10 @@ export const ConfigSchema = z.object({
   activeModel: z.string().default(""),
   telegramToken: z.string().default(""),
   telegramChatId: z.string().default(""),
+  // API key for the Tavily web-research backend (https://tavily.com). Also
+  // readable from the TAVILY_API_KEY environment variable, which takes
+  // precedence so the secret need never live in a file.
+  tavilyApiKey: z.string().default(""),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -88,11 +92,15 @@ function applyEnvOverrides(config: Config): Config {
   const result = { ...config };
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
+  const tavily = process.env.TAVILY_API_KEY;
   if (token && token.trim().length > 0) {
     result.telegramToken = token.trim();
   }
   if (chatId && chatId.trim().length > 0) {
     result.telegramChatId = chatId.trim();
+  }
+  if (tavily && tavily.trim().length > 0) {
+    result.tavilyApiKey = tavily.trim();
   }
   return result;
 }

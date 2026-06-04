@@ -30,6 +30,7 @@ const FIELDS: Field[] = [
   { key: "activeModel", label: "Active model", type: "text" },
   { key: "telegramToken", label: "Telegram token", type: "secret" },
   { key: "telegramChatId", label: "Telegram chat ID", type: "text" },
+  { key: "tavilyApiKey", label: "Tavily API key", type: "secret" },
 ];
 
 /** Mask a secret for display so credentials never appear on screen at rest. */
@@ -57,6 +58,8 @@ function helpFor(field: Field, detected: string[]): string {
       return "model name/id (e.g. gpt-4o, claude-sonnet-4, gemini-2.0-flash, llama3); blank = provider default";
     case "telegramToken":
       return "validated via getMe; leave blank to disable Telegram";
+    case "tavilyApiKey":
+      return "API key for the web-research tool (tavily.com); or set TAVILY_API_KEY in the environment";
     default:
       return "";
   }

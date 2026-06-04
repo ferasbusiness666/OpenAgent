@@ -88,9 +88,14 @@ export function listRecentSessions(projectId: string, limit = 10): SessionInfo[]
  * Delete session files whose last-modified time is older than `maxAgeDays`
  * across all projects. Empty project directories left behind are removed too.
  * Never throws; returns the number of session files deleted.
+ *
+ * @param exemptSessionId When set, the top-level `<exemptSessionId>.json` state
+ *        file is never pruned — used to protect a session being resumed.
  */
-export function pruneOldSessions(maxAgeDays = 30): number {
+export function pruneOldSessions(maxAgeDays = 30, exemptSessionId?: string): number {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  const exemptFile =
+    exemptSessionId && exemptSessionId.length > 0 ? `${exemptSessionId}.json` : undefined;
   let removed = 0;
   if (!fs.existsSync(SESSIONS_DIR)) {
     return 0;
@@ -108,8 +113,12 @@ export function pruneOldSessions(maxAgeDays = 30): number {
       const stat = fs.statSync(dir);
       if (!stat.isDirectory()) {
         // Top-level file (e.g. a SessionManager state file like <sessionId>.json).
-        // Prune it if it is old enough.
-        if (projectId.endsWith(".json") && stat.mtimeMs < cutoff) {
+        // Prune it if it is old enough — unless it is the exempt (resuming) session.
+        if (
+          projectId.endsWith(".json") &&
+          projectId !== exemptFile &&
+          stat.mtimeMs < cutoff
+        ) {
           try {
             fs.removeSync(dir);
             removed += 1;

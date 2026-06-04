@@ -37,9 +37,13 @@ function postResult(result) {
 function runShell(job) {
   const cwd = job.cwd ?? process.cwd();
   const timeout = job.timeoutMs ?? 30000;
+  // killSignal SIGKILL: on timeout, exec force-kills the child itself (rather
+  // than a SIGTERM the child might ignore). The pool's backstop fires later, so
+  // this in-worker reap is what prevents the child from being orphaned when a
+  // slow command runs past its deadline.
   exec(
     job.source,
-    { cwd, timeout, windowsHide: true, maxBuffer: 1 << 20 },
+    { cwd, timeout, killSignal: "SIGKILL", windowsHide: true, maxBuffer: 1 << 20 },
     (error, stdout, stderr) => {
       const output = `${stdout ?? ""}${stderr ?? ""}`;
       postResult({
@@ -54,41 +58,61 @@ function runShell(job) {
 }
 
 /**
- * Try to run "js" source under isolated-vm. Returns a result object on success
- * or throws on any failure (so the caller falls through to the vm fallback).
+ * Load the isolated-vm module if it is installed and usable. Returns the module
+ * (with an `Isolate` constructor) or null when it is unavailable. Distinguishing
+ * "unavailable" from "the guest threw" is deliberate: only true unavailability
+ * should make runJs fall back to the vm sandbox — a guest error is a real result.
  */
-async function runWithIsolatedVm(source, timeoutMs) {
-  let ivm;
+async function loadIsolatedVm() {
   try {
     const mod = await import("isolated-vm");
-    ivm = mod.default ?? mod;
+    const ivm = mod.default ?? mod;
+    return ivm && typeof ivm.Isolate === "function" ? ivm : null;
   } catch {
-    ivm = null;
+    return null;
   }
-  if (!ivm || typeof ivm.Isolate !== "function") {
-    throw new Error("isolated-vm unavailable");
-  }
+}
 
+/**
+ * Run "js" source under isolated-vm (assumed available). Returns a result object
+ * for BOTH success and a guest error — it never throws for guest code, so the
+ * caller does not silently re-execute the source under vm on a real error.
+ *
+ * The source is evaluated as a normal program (no IIFE wrapper) so its trailing
+ * expression's completion value is preserved, matching the vm fallback. A host
+ * `log` reference backs a `console.log` shim defined ahead of the user code.
+ */
+function runWithIsolatedVm(ivm, source, timeoutMs) {
   const logs = [];
   const isolate = new ivm.Isolate({ memoryLimit: 64 });
   try {
     const context = isolate.createContextSync();
     const jail = context.global;
     jail.setSync("global", jail.derefInto());
-    // Expose a host `log` callback the guest can call to accumulate output.
     jail.setSync(
       "log",
       new ivm.Reference((...args) => {
         logs.push(args.map((a) => String(a)).join(" "));
       }),
     );
-    // Provide a console.log shim and capture the final expression value.
-    const wrapped = `
-      const console = { log: (...a) => log.applySync(undefined, a.map(x => String(x))) };
-      (function(){ ${source}\n })();
-    `;
-    const script = isolate.compileScriptSync(wrapped);
-    const value = script.runSync(context, { timeout: timeoutMs });
+    const program =
+      "const console = { log: (...a) => log.applySync(undefined, a.map(x => String(x))) };\n" +
+      source;
+    const script = isolate.compileScriptSync(program);
+    let value;
+    try {
+      // copy: true so a non-primitive completion value is marshalled out by
+      // value; a guest throw (or a non-copyable result) is reported as failure.
+      value = script.runSync(context, { timeout: timeoutMs, copy: true });
+    } catch (err) {
+      return {
+        type: "result",
+        success: false,
+        output: logs.join("\n"),
+        error: String((err && err.message) || err),
+        engine: "isolated-vm",
+      };
+    }
     const valueStr =
       value !== undefined && value !== null ? safeStringify(value) : "";
     const parts = [];
@@ -137,18 +161,19 @@ async function runWithVm(source, timeoutMs) {
   }
 }
 
-/** Run a "js" job: isolated-vm first, vm fallback on any error. */
+/**
+ * Run a "js" job. Uses isolated-vm when it is installed (a guest error is then a
+ * real failure, not a reason to re-run); otherwise falls back to Node's vm. The
+ * source is executed exactly once in either case.
+ */
 async function runJs(job) {
   const timeoutMs = job.timeoutMs ?? 30000;
-  try {
-    const result = await runWithIsolatedVm(job.source, timeoutMs);
-    postResult(result);
+  const ivm = await loadIsolatedVm();
+  if (ivm) {
+    postResult(runWithIsolatedVm(ivm, job.source, timeoutMs));
     return;
-  } catch {
-    // Fall through to the vm fallback below.
   }
-  const fallback = await runWithVm(job.source, timeoutMs);
-  postResult(fallback);
+  postResult(await runWithVm(job.source, timeoutMs));
 }
 
 /** Entry: dispatch on job kind, guaranteeing exactly one result message. */

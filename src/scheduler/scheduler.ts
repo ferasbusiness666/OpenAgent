@@ -241,8 +241,12 @@ export class Scheduler extends EventEmitter {
         continue;
       }
 
-      schedule.lastRun = new Date(now).toISOString();
-      const nextRun = this.computeNextRun(schedule.trigger, now);
+      // Snap an interval's lastRun to its scheduled cadence boundary (anchored
+      // at createdAt) rather than the actual poll time, so repeated fires don't
+      // drift forward by up to one poll interval each time.
+      const firedAt = this.fireAnchor(schedule, now);
+      schedule.lastRun = new Date(firedAt).toISOString();
+      const nextRun = this.computeNextRun(schedule.trigger, firedAt);
       if (nextRun !== undefined) {
         schedule.nextRun = nextRun;
       } else {
@@ -276,6 +280,28 @@ export class Scheduler extends EventEmitter {
   // Internal: due-ness + next-run computation
   // -------------------------------------------------------------------------
 
+  /**
+   * The effective "fired at" timestamp for a due schedule. For an interval this
+   * snaps to the scheduled cadence boundary (anchored at lastRun/createdAt) at
+   * or before `now`, so fires stay aligned to the original cadence instead of
+   * drifting forward by the poll interval. For once/daily it is simply `now`.
+   */
+  private fireAnchor(schedule: Schedule, now: number): number {
+    const trigger = schedule.trigger;
+    if (trigger.type === "interval" && trigger.everyMs > 0) {
+      const base = schedule.lastRun
+        ? Date.parse(schedule.lastRun)
+        : Date.parse(schedule.createdAt);
+      if (!Number.isNaN(base)) {
+        const steps = Math.floor((now - base) / trigger.everyMs);
+        if (steps >= 1) {
+          return base + steps * trigger.everyMs;
+        }
+      }
+    }
+    return now;
+  }
+
   /** Determines whether a single schedule is due at `now` (epoch ms). */
   private isDue(schedule: Schedule, now: number): boolean {
     const trigger = schedule.trigger;
@@ -304,12 +330,21 @@ export class Scheduler extends EventEmitter {
         if (now < target) {
           return false;
         }
-        // Already fired today? Compare local calendar days.
-        if (schedule.lastRun !== undefined) {
-          const last = Date.parse(schedule.lastRun);
-          if (!Number.isNaN(last) && isSameLocalDay(last, now)) {
+        if (schedule.lastRun === undefined) {
+          // Never fired: don't fire on the creation day if the day's target
+          // time had already passed when the schedule was created. This matches
+          // computeNextRun, which points the first run at tomorrow in that case,
+          // so the displayed nextRun and the actual first fire agree.
+          const createdMs = Date.parse(schedule.createdAt);
+          if (!Number.isNaN(createdMs) && target < createdMs) {
             return false;
           }
+          return true;
+        }
+        // Already fired today? Compare local calendar days.
+        const last = Date.parse(schedule.lastRun);
+        if (!Number.isNaN(last) && isSameLocalDay(last, now)) {
+          return false;
         }
         return true;
       }

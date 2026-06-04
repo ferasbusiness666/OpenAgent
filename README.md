@@ -13,7 +13,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser.
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
 - **Sandboxed code execution** — the `code` tool runs JavaScript in an isolated, resource-limited worker (`isolated-vm` when installed, falling back to Node's `vm`), and can run several snippets in parallel.
-- **Web research** — the `research` tool searches the web and digests the top results using the headless browser, no API key required.
+- **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
 - **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
 - **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json` and are fired by an in-process poller when the agent is idle (`/schedule`).
@@ -106,6 +106,7 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "openrouter"` (api mode). OpenRouter uses the OpenAI-compatible API at `https://openrouter.ai/api/v1`. |
 | `activeModel` | Model name/id to use (e.g. `gpt-4o`, `gemini-2.0-flash`, `llama3`, or an OpenRouter id like `openai/gpt-4o`); blank = provider default. |
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
+| `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |
 
 You can edit all of these live from inside the app with `/settings`. Values are **validated before they are saved** — an invalid value is rejected and not written:
 

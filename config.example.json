@@ -6,5 +6,6 @@
   "apiProvider": "anthropic",
   "activeModel": "",
   "telegramToken": "",
-  "telegramChatId": ""
+  "telegramChatId": "",
+  "tavilyApiKey": ""
 }

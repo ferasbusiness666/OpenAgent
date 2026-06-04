@@ -85,9 +85,10 @@ async function main(): Promise<void> {
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
 
-  // Move any legacy data into ~/.openagent/ and tidy stale sessions up front.
+  // Move any legacy data into ~/.openagent/ up front. Pruning of stale sessions
+  // is deferred until AFTER the resume target is loaded (below), so resuming an
+  // old session never races the cleanup that would delete its state file.
   migrateLegacyData();
-  pruneOldSessions(30);
 
   let config: Config = getConfig();
   const browserOk = isBrowserAvailable();
@@ -106,6 +107,10 @@ async function main(): Promise<void> {
     );
   }
   const sessionId = resumedState?.sessionId ?? resumeId ?? sessionManager.newSessionId();
+
+  // Now that any resume target is safely loaded into memory, tidy stale
+  // sessions — exempting the session being resumed so it is never deleted.
+  pruneOldSessions(30, resumeId);
 
   // The scheduler's in-process poller (interactive mode only); torn down on exit.
   let scheduler: Scheduler | null = null;

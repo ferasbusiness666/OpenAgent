@@ -129,6 +129,9 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
       case "telegramChatId":
         partial.telegramChatId = value;
         break;
+      case "tavilyApiKey":
+        partial.tavilyApiKey = value;
+        break;
       case "providerMode":
         if (value !== "cli" && value !== "api") {
           return { error: "providerMode must be 'cli' or 'api'." };
@@ -216,11 +219,25 @@ function parseScheduleSpec(spec: string): ScheduleTrigger | null {
   return null;
 }
 
+/** Format a millisecond duration as a compact human string (e.g. "5m", "1h 30m"). */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  if (s > 0) parts.push(`${s}s`);
+  return parts.length > 0 ? parts.join(" ") : "0s";
+}
+
 /** One-line human description of a schedule trigger. */
 function describeTrigger(t: ScheduleTrigger): string {
   switch (t.type) {
     case "interval":
-      return `every ${t.everyMs}ms`;
+      return `every ${formatDuration(t.everyMs)}`;
     case "once":
       return `once at ${new Date(t.at).toLocaleString()}`;
     case "daily":
@@ -291,10 +308,14 @@ export function App({
     const onThought = (thought: string) => {
       push({ kind: "thought", text: thought });
       setStatus({ state: "thinking" });
+      // Reflect activity even for runs the UI didn't start (e.g. a scheduled
+      // task), so the prompt shows "working…" and user submits are blocked.
+      setBusy(true);
     };
     const onToolCall = (data: { tool: string; params: Record<string, unknown> }) => {
       push({ kind: "toolCall", tool: data.tool, params: data.params });
       setStatus({ state: "running", tool: data.tool });
+      setBusy(true);
     };
     const onToolResult = (data: { tool: string; result: string; success: boolean }) => {
       push({ kind: "toolResult", tool: data.tool, result: data.result, success: data.success });
@@ -531,14 +552,20 @@ export function App({
             setOverlay("memory");
             break;
           }
-          const hits = new LongTermMemory().recall(query, 5);
-          if (hits.length === 0) {
-            push({ kind: "agent", text: `No stored memories matched "${query}".` });
-          } else {
-            const body = hits
-              .map((h, i) => `${i + 1}. (${h.score.toFixed(2)}) ${h.excerpt}`)
-              .join("\n");
-            push({ kind: "agent", text: `Memory matches for "${query}":\n${body}` });
+          // Guard: LongTermMemory's ctor touches the filesystem (ensureDirSync);
+          // a failure here must not escape the input handler and crash the TUI.
+          try {
+            const hits = new LongTermMemory().recall(query, 5);
+            if (hits.length === 0) {
+              push({ kind: "agent", text: `No stored memories matched "${query}".` });
+            } else {
+              const body = hits
+                .map((h, i) => `${i + 1}. (${h.score.toFixed(2)}) ${h.excerpt}`)
+                .join("\n");
+              push({ kind: "agent", text: `Memory matches for "${query}":\n${body}` });
+            }
+          } catch (err) {
+            push({ kind: "error", text: `Could not search memory: ${errText(err)}` });
           }
           break;
         }
@@ -561,8 +588,17 @@ export function App({
               text: ok ? `Removed schedule ${tail}.` : `No schedule with id "${tail}".`,
             });
           } else if (sub === "add") {
-            const spec = tail.split(/\s+/)[0] ?? "";
-            const task = tail.slice(spec.length).trim();
+            let spec = tail.split(/\s+/)[0] ?? "";
+            let task = tail.slice(spec.length).trim();
+            // Support a space-separated ISO datetime ("2026-06-10 15:00"): fold a
+            // trailing HH:MM[:SS] token into the date so it parses as one instant.
+            if (/^\d{4}-\d{2}-\d{2}$/.test(spec)) {
+              const timeTok = task.split(/\s+/)[0] ?? "";
+              if (/^\d{2}:\d{2}(:\d{2})?$/.test(timeTok)) {
+                spec = `${spec}T${timeTok}`;
+                task = task.slice(timeTok.length).trim();
+              }
+            }
             const trigger = parseScheduleSpec(spec);
             if (trigger === null || task.length === 0) {
               push({
@@ -970,9 +1006,7 @@ function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
     },
     {
       name: "research",
-      detail: browserAvailable
-        ? "web research — search + digest top results (no API key)"
-        : "unavailable — needs the browser (npx playwright install chromium)",
+      detail: "web research via the Tavily API — search + digest top results (needs TAVILY_API_KEY)",
     },
     { name: "code", detail: "run sandboxed JavaScript in resource-limited worker threads (parallel)" },
     { name: "memory", detail: "long-term memory — remember / recall with BM25 keyword search" },

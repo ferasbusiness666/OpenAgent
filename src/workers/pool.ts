@@ -46,6 +46,16 @@ const workerUrl = new URL("./worker-entry.mjs", import.meta.url);
 /** Most recent N statuses retained in the live map / surfaced via snapshots. */
 const MAX_TRACKED_STATUSES = 50;
 
+/**
+ * Grace added to the pool's backstop timer beyond a job's own timeout. The
+ * worker enforces `timeoutMs` itself (vm/isolated-vm script timeout for "js",
+ * exec timeout with SIGKILL for "shell") and posts a result; this backstop only
+ * fires for a genuinely wedged worker that never reports back. Keeping it later
+ * than the worker's own deadline ensures the worker (which can actually reap a
+ * spawned child process) wins the race, so terminate() never orphans a child.
+ */
+const TIMEOUT_GRACE_MS = 2000;
+
 /** An enqueued job plus the resolver for its pending promise. */
 interface PendingJob {
   job: WorkerJob;
@@ -257,7 +267,7 @@ export class WorkerPool extends EventEmitter {
         error: `timed out after ${timeoutMs}ms`,
         engine: job.kind === "shell" ? "shell" : "vm",
       });
-    }, timeoutMs);
+    }, timeoutMs + TIMEOUT_GRACE_MS);
     this.timers.set(job.id, timer);
 
     worker.on("message", (raw: unknown) => {
