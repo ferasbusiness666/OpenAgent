@@ -12,7 +12,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
 - **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser.
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
-- **Sandboxed code execution** — the `code` tool runs JavaScript in an isolated, resource-limited worker (`isolated-vm` when installed, falling back to Node's `vm`), and can run several snippets in parallel.
+- **Sandboxed code execution** — the `code` tool runs JavaScript in a resource-limited worker thread (heap cap + hard timeout) using Node's built-in `vm` by default, and can run several snippets in parallel. (`isolated-vm` is an opt-in hardening hook for stronger isolation later: set `OPENAGENT_SANDBOX=isolated-vm` and install the optional dependency — the local `vm` engine is the default and always-available path.)
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
 - **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.

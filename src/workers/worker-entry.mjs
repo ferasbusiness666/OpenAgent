@@ -162,16 +162,28 @@ async function runWithVm(source, timeoutMs) {
 }
 
 /**
- * Run a "js" job. Uses isolated-vm when it is installed (a guest error is then a
- * real failure, not a reason to re-run); otherwise falls back to Node's vm. The
- * source is executed exactly once in either case.
+ * Run a "js" job.
+ *
+ * The LOCAL Node `vm` sandbox is the default, always-available engine: it needs
+ * no native build, runs on every platform, and executes inside this worker
+ * thread under a heap cap (resourceLimits) and a hard timeout.
+ *
+ * isolated-vm is an OPT-IN hardening path reserved for later: it is only used
+ * when explicitly requested via OPENAGENT_SANDBOX=isolated-vm *and* the optional
+ * `isolated-vm` package is installed. It is never selected automatically, so the
+ * local engine stays the main path — the scaffolding (loadIsolatedVm /
+ * runWithIsolatedVm) is just the hook to build on when stronger isolation is
+ * wanted. The source is executed exactly once in either case.
  */
 async function runJs(job) {
   const timeoutMs = job.timeoutMs ?? 30000;
-  const ivm = await loadIsolatedVm();
-  if (ivm) {
-    postResult(runWithIsolatedVm(ivm, job.source, timeoutMs));
-    return;
+  if (process.env.OPENAGENT_SANDBOX === "isolated-vm") {
+    const ivm = await loadIsolatedVm();
+    if (ivm) {
+      postResult(runWithIsolatedVm(ivm, job.source, timeoutMs));
+      return;
+    }
+    // Opted in but the package isn't installed — fall back to the local engine.
   }
   postResult(await runWithVm(job.source, timeoutMs));
 }
