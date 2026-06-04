@@ -132,7 +132,10 @@ export class AgentLoop extends EventEmitter {
 
   /** A copy of the current plan phases (never the internal reference). */
   get plan(): Phase[] {
-    return this.phases.map((p) => ({ ...p, findings: [...p.findings] }));
+    return this.phases.map((p) => ({
+      ...p,
+      findings: Array.isArray(p.findings) ? [...p.findings] : [],
+    }));
   }
 
   /** The id of the session this loop persists under. */
@@ -141,13 +144,14 @@ export class AgentLoop extends EventEmitter {
   }
 
   /**
-   * Restore goal and plan from a persisted AgentState. History restoration is
-   * handled by the caller seeding the shared SessionMemory (e.g. via
-   * session.replaceHistory). Kept simple: only goal/phases are adopted here.
+   * Clear the plan for a brand-new conversation (e.g. after /clear). The shared
+   * SessionMemory is reset separately by the caller; here we only drop the goal
+   * and phases and emit the now-empty plan so the UI's plan view clears.
    */
-  restore(state: AgentState): void {
-    this.goal = state.goal;
-    this.phases = state.phases.map((p) => ({ ...p, findings: [...p.findings] }));
+  reset(): void {
+    this.phases = [];
+    this.goal = "";
+    this.emit("phaseUpdate", this.plan);
   }
 
   /**
@@ -185,6 +189,9 @@ export class AgentLoop extends EventEmitter {
     }
     phase.status = progress.status;
     if (progress.finding && progress.finding.trim().length > 0) {
+      if (!Array.isArray(phase.findings)) {
+        phase.findings = [];
+      }
       phase.findings.push(progress.finding.trim());
     }
     this.emit("phaseUpdate", this.plan);
@@ -207,31 +214,39 @@ export class AgentLoop extends EventEmitter {
     const corrector = new Corrector();
     this.session.add({ role: "user", content: task, timestamp: new Date() });
 
-    // ---- Plan once per run when no plan exists yet -----------------------
-    if (this.phases.length === 0) {
-      this.goal = task;
-      try {
-        this.phases = await this.planner.decompose(task);
-      } catch {
-        // decompose itself never throws, but be defensive: fall back to one phase.
-        this.phases = [
-          { id: 1, title: task.slice(0, 80), description: task, status: "pending", findings: [] },
-        ];
-      }
-      if (this.phases.length === 0) {
-        this.phases = [
-          { id: 1, title: task.slice(0, 80), description: task, status: "pending", findings: [] },
-        ];
-      }
-      this.emit("plan", this.plan);
-      const first = this.phases[0];
-      if (first) {
-        first.status = "in_progress";
-      }
-      this.persistState();
-    }
-
     try {
+      // ---- Plan for a fresh goal, but preserve an in-progress plan --------
+      // Re-plan when there is no plan yet OR the previous plan is fully
+      // completed/failed (a brand-new follow-up task). When phases are still
+      // pending/in_progress (e.g. resuming after "stuck"), keep the existing
+      // plan and continue it. The planning block is inside the try so that a
+      // throw from decompose/emit/a listener still resets this.running below.
+      const noActivePlan =
+        this.phases.length === 0 ||
+        this.phases.every((p) => p.status === "completed" || p.status === "failed");
+      if (noActivePlan) {
+        this.goal = task;
+        try {
+          this.phases = await this.planner.decompose(task, this.provider);
+        } catch {
+          // decompose itself never throws, but be defensive: fall back to one phase.
+          this.phases = [
+            { id: 1, title: task.slice(0, 80), description: task, status: "pending", findings: [] },
+          ];
+        }
+        if (this.phases.length === 0) {
+          this.phases = [
+            { id: 1, title: task.slice(0, 80), description: task, status: "pending", findings: [] },
+          ];
+        }
+        this.emit("plan", this.plan);
+        const first = this.phases[0];
+        if (first) {
+          first.status = "in_progress";
+        }
+        this.persistState();
+      }
+
       for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
         const prompt = buildPrompt({
           agentMd: this.agentMemory.getContent(),
@@ -292,6 +307,19 @@ export class AgentLoop extends EventEmitter {
 
         // ---- Terminal actions -------------------------------------------------
         if (response.action === "done") {
+          // "done" means the whole task is finished. Mark any still-open phases
+          // completed so a follow-up run() with a new goal re-plans from scratch
+          // (the noActivePlan gate) instead of resuming this now-stale plan.
+          let changed = false;
+          for (const phase of this.phases) {
+            if (phase.status !== "completed" && phase.status !== "failed") {
+              phase.status = "completed";
+              changed = true;
+            }
+          }
+          if (changed) {
+            this.emit("phaseUpdate", this.plan);
+          }
           this.persistState();
           this.emit("done", response.message ?? "Task complete.");
           return;

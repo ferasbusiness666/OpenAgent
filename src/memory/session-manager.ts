@@ -44,6 +44,33 @@ interface StoredAgentState {
   updatedAt: string;
 }
 
+/**
+ * Safely coerce a raw (possibly incomplete/malformed) value read from disk into
+ * a well-formed Phase. Returns null for any value that is not an object, so the
+ * caller can filter nulls with a type predicate.
+ */
+function normalizePhase(value: unknown, index: number): Phase | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const status = v.status;
+  const validStatus =
+    status === "pending" ||
+    status === "in_progress" ||
+    status === "completed" ||
+    status === "failed"
+      ? status
+      : "pending";
+  return {
+    id: typeof v.id === "number" ? v.id : index + 1,
+    title: typeof v.title === "string" ? v.title : "",
+    description: typeof v.description === "string" ? v.description : "",
+    status: validStatus,
+    findings: Array.isArray(v.findings)
+      ? v.findings.filter((f): f is string => typeof f === "string")
+      : [],
+  };
+}
+
 /** Type guard for the Message role union. */
 function isRole(value: unknown): value is Message["role"] {
   return (
@@ -136,7 +163,9 @@ export class SessionManager {
             return acc;
           }, [])
         : [];
-      const phases: Phase[] = Array.isArray(r.phases) ? (r.phases as Phase[]) : [];
+      const phases: Phase[] = Array.isArray(r.phases)
+        ? r.phases.map((p, i) => normalizePhase(p, i)).filter((p): p is Phase => p !== null)
+        : [];
       const metadata: Record<string, unknown> =
         typeof r.metadata === "object" && r.metadata !== null
           ? (r.metadata as Record<string, unknown>)

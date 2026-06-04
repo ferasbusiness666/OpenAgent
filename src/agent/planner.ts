@@ -16,13 +16,17 @@ export const AgentResponseSchema = z.object({
   // Optional plan-progress signal. When present the loop updates the matching
   // phase's status and records the finding. Never required, so existing
   // responses that omit it stay valid.
+  // .catch(undefined) ensures a malformed or null progress value (e.g. the
+  // model emits `"progress": null` or `"phase": "1"`) degrades to "no progress"
+  // instead of causing safeParse to reject the entire response.
   progress: z
     .object({
-      phase: z.number(),
+      phase: z.coerce.number(),
       status: z.enum(["in_progress", "completed", "failed"]),
       finding: z.string().optional(),
     })
-    .optional(),
+    .optional()
+    .catch(undefined),
 });
 
 export type AgentResponse = z.infer<typeof AgentResponseSchema>;

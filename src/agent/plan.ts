@@ -98,8 +98,14 @@ Reply with ONLY a JSON array and nothing else — no prose, no markdown fences. 
 export class Planner {
   constructor(private readonly provider: Provider) {}
 
-  /** Decompose `goal` into 3–7 ordered phases. Falls back to one phase on error. */
-  async decompose(goal: string): Promise<Phase[]> {
+  /**
+   * Decompose `goal` into 3–7 ordered phases. Falls back to one phase on error.
+   *
+   * An optional `provider` override lets the caller use a hot-swapped provider
+   * (e.g. after a /model or /provider switch) instead of the one captured at
+   * construction time; when omitted the constructor's provider is used.
+   */
+  async decompose(goal: string, provider?: Provider): Promise<Phase[]> {
     const fallback = (): Phase[] => [
       {
         id: 1,
@@ -110,9 +116,10 @@ export class Planner {
       },
     ];
 
+    const p = provider ?? this.provider;
     let raw: string;
     try {
-      raw = await this.provider.complete(buildPlanningPrompt(goal));
+      raw = await p.complete(buildPlanningPrompt(goal));
     } catch {
       return fallback();
     }

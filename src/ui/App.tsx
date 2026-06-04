@@ -462,6 +462,7 @@ export function App({
           break;
         case "/clear":
           session?.clear();
+          agentLoop.reset();
           setMessages([{ kind: "agent", text: "Conversation cleared. Same project, fresh start." }]);
           setPhases([]);
           setStatus({ state: "idle" });
@@ -470,7 +471,7 @@ export function App({
           push({ kind: "error", text: `Unknown command: ${name}. Type /help.` });
       }
     },
-    [session, push],
+    [session, push, agentLoop],
   );
 
   // ---- Overlay submit handlers ---------------------------------------------

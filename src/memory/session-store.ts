@@ -105,7 +105,18 @@ export function pruneOldSessions(maxAgeDays = 30): number {
     const dir = path.join(SESSIONS_DIR, projectId);
     let files: string[];
     try {
-      if (!fs.statSync(dir).isDirectory()) {
+      const stat = fs.statSync(dir);
+      if (!stat.isDirectory()) {
+        // Top-level file (e.g. a SessionManager state file like <sessionId>.json).
+        // Prune it if it is old enough.
+        if (projectId.endsWith(".json") && stat.mtimeMs < cutoff) {
+          try {
+            fs.removeSync(dir);
+            removed += 1;
+          } catch {
+            // Skip files we cannot remove.
+          }
+        }
         continue;
       }
       files = fs.readdirSync(dir);
