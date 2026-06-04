@@ -27,6 +27,10 @@ export const PROJECTS_PATH = path.join(DATA_DIR, "projects.json");
 export const SESSIONS_DIR = path.join(DATA_DIR, "sessions");
 /** Global, cross-project AGENT.md memory. */
 export const GLOBAL_AGENT_MD_PATH = path.join(DATA_DIR, "AGENT.md");
+/** Long-term, BM25-searchable knowledge store (one Markdown file per note). */
+export const MEMORY_DIR = path.join(DATA_DIR, "memory");
+/** Local scheduling store, polled by the in-process scheduler. */
+export const SCHEDULES_PATH = path.join(DATA_DIR, "schedules.json");
 
 // This module is src/paths.ts, so the install root is one level up from src/.
 // Used only to migrate data that older builds wrote into the app folder.
@@ -37,6 +41,7 @@ export const INSTALL_ROOT = path.resolve(__dirname, "..");
 export function ensureDataDir(): void {
   fs.ensureDirSync(DATA_DIR);
   fs.ensureDirSync(SESSIONS_DIR);
+  fs.ensureDirSync(MEMORY_DIR);
 }
 
 /**

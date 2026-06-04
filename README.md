@@ -1,6 +1,6 @@
 # Open Agent
 
-An open-source, self-hosted autonomous AI agent that runs locally — a lightweight alternative to Manus. Give it a task and it plans, executes end-to-end with real tools (shell, filesystem, headless browser), observes results, and self-corrects on failure. It only stops to ask when it is genuinely stuck.
+An open-source, self-hosted autonomous AI agent that runs locally — a lightweight alternative to Manus. Give it a task and it plans, executes end-to-end with real tools (shell, filesystem, headless browser, web research, sandboxed code, GitHub, long-term memory), observes results, and self-corrects on failure. It only stops to ask when it is genuinely stuck.
 
 The primary interface is a terminal UI styled like Claude Code / OpenCode. Telegram acts as a remote controller that mirrors the terminal session.
 
@@ -11,11 +11,17 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
 - **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser.
-- **GitHub connector** — read-only GitHub access (list repos, read file contents, list issues) via the `github` tool, authenticated with the `GITHUB_TOKEN` environment variable.
+- **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
+- **Sandboxed code execution** — the `code` tool runs JavaScript in an isolated, resource-limited worker (`isolated-vm` when installed, falling back to Node's `vm`), and can run several snippets in parallel.
+- **Web research** — the `research` tool searches the web and digests the top results using the headless browser, no API key required.
+- **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
+- **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
+- **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json` and are fired by an in-process poller when the agent is idle (`/schedule`).
+- **GitHub connector** — read **and write** GitHub access via the `github` tool (list repos, read files, list issues, create/comment/close issues, list/get/create pull requests), authenticated with the `GITHUB_TOKEN` environment variable.
 - **Provider-agnostic** — drive it with a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) or a hosted API (OpenAI, Anthropic, Google, OpenRouter). The CLI bridge is hardened against hangs, crashes, and noisy output.
 - **Projects & saved sessions** — each directory you launch in is remembered as a project; every message is saved to a per-project session file on disk, and you can reopen a recent one with `/sessions`.
 - **Hot provider/model switching** — change provider or model mid-conversation (`/provider`, `/model`) without losing any history.
-- **Slash commands** — `/settings`, `/tools`, `/model`, `/provider`, `/history`, `/sessions`, `/clear`, `/help` run inline from the chat.
+- **Slash commands** — `/settings`, `/tools`, `/model`, `/provider`, `/history`, `/sessions`, `/workers`, `/memory`, `/schedule`, `/clear`, `/help` run inline from the chat.
 - **Two-level persistent memory** — a global `AGENT.md` plus a per-project `AGENT.md` carry durable facts across sessions.
 - **Remote control** — optional Telegram bridge mirrors every step and accepts new tasks.
 
@@ -68,6 +74,9 @@ When you launch in a directory, Open Agent walks through this sequence before th
 | `/provider` | Switch the active provider (CLI ↔ API) — the conversation is preserved. |
 | `/history` | Show the current session's message history. |
 | `/sessions` | List and load a recent session for this project. |
+| `/workers` | Show the parallel worker pool's live activity. |
+| `/memory` | List long-term memory, or `/memory <query>` to BM25-search it. |
+| `/schedule` | List schedules; `/schedule add <30s\|5m\|HH:MM\|ISO> <task>` to add, `/schedule remove <id>` to delete. |
 | `/clear` | Clear the conversation (stays in the same project). |
 | `/help` | Show the command list. |
 
@@ -82,6 +91,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
   config.json        provider, API keys, settings
   AGENT.md           global persistent memory
   projects.json      registry of known projects
+  schedules.json     local scheduling store (polled in-process)
+  memory/            long-term memory notes (one Markdown file each)
   sessions/<projectId>/<timestamp>.json
 ```
 
@@ -137,7 +148,7 @@ Every turn the agent receives a system prompt (its identity + the merged `AGENT.
 ```json
 {
   "thought": "internal reasoning",
-  "action": "shell | filesystem | browser | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | done | stuck",
   "params": {},
   "message": "optional text for the user"
 }
@@ -173,12 +184,19 @@ src/
   ui/        Ink terminal UI: App, ChatView, StatusBar, ToolOutput,
              CommandMenu, SettingsScreen, ModelPicker, ProviderPicker,
              SessionsPanel, commands
-  agent/     loop (hot-swappable provider), planner, corrector
-  tools/     shell (cross-platform), filesystem, browser, registry
+  agent/     loop (hot-swappable provider), planner, plan (multi-phase),
+             corrector (self-healing exponential back-off)
+  tools/     shell (cross-platform), filesystem, browser, research,
+             code (sandboxed JS), registry
+  workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
+  scheduler/ file-based scheduler + types
+  connectors/ github (read + PR/issue write), registry, types
   providers/ detector, cli, api, factory
   memory/    session (in-memory + disk persistence),
              session-store (session file paths/serialization),
+             session-manager (resumable AgentState), longterm (BM25 memory),
              projects (projects.json registry), agent-md (durable)
+  ui/        + WorkerPanel (parallel-worker visualization)
   telegram/  remote-control bridge
   config/    zod-validated config, validate (live settings validation)
   util/      json (extract/parse JSON from noisy output)

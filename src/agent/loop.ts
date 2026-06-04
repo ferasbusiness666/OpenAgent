@@ -19,7 +19,15 @@ import { randomUUID } from "node:crypto";
 const MAX_ITERATIONS = 50;
 
 /** The set of tool actions (vs. the terminal "done"/"stuck" actions). */
-const TOOL_ACTIONS = ["shell", "filesystem", "browser", "github"] as const;
+const TOOL_ACTIONS = [
+  "shell",
+  "filesystem",
+  "browser",
+  "github",
+  "research",
+  "code",
+  "memory",
+] as const;
 type ToolAction = (typeof TOOL_ACTIONS)[number];
 
 function isToolAction(action: AgentResponse["action"]): action is ToolAction {
@@ -282,6 +290,10 @@ export class AgentLoop extends EventEmitter {
             );
             return;
           }
+          // Self-healing: back off before re-prompting after a malformed reply.
+          if (outcome.backoffMs > 0) {
+            await delay(outcome.backoffMs);
+          }
           continue;
         }
 
@@ -373,6 +385,11 @@ export class AgentLoop extends EventEmitter {
               );
               return;
             }
+            // Self-healing: wait with exponential back-off before the next try so
+            // transient failures (rate limits, races, flaky network) can clear.
+            if (outcome.backoffMs > 0) {
+              await delay(outcome.backoffMs);
+            }
           }
           continue;
         }
@@ -439,6 +456,11 @@ function stableStringify(value: unknown): string {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+/** Promise that resolves after `ms` milliseconds (used for retry back-off). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errMessage(err: unknown): string {

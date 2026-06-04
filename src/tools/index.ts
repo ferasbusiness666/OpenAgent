@@ -3,6 +3,9 @@ import type { ShellResult } from "./shell.js";
 import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
+import { CodeTool } from "./code.js";
+import { ResearchTool } from "./research.js";
+import { LongTermMemory, type RecallHit } from "../memory/longterm.js";
 import { getConnector } from "../connectors/index.js";
 
 export { ShellTool } from "./shell.js";
@@ -10,6 +13,8 @@ export type { ShellResult } from "./shell.js";
 export { FilesystemTool, PathTraversalError } from "./filesystem.js";
 export type { FilesystemOperation } from "./filesystem.js";
 export { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
+// Re-exported so the entry point can tear the worker pool down on exit.
+export { closeWorkerPool } from "../workers/pool.js";
 
 /** Validated parameter shape for the shell tool. */
 export interface ShellParams {
@@ -55,22 +60,48 @@ class ToolRegistry {
   readonly shell = new ShellTool();
   readonly filesystem = new FilesystemTool();
   readonly browser = new BrowserTool();
+  readonly code = new CodeTool();
+  readonly research = new ResearchTool();
+  readonly memory = new LongTermMemory();
 }
 
 const registry = new ToolRegistry();
 
 /** GitHub operations the registry can dispatch. */
-export type GitHubOperation = "listRepos" | "readFile" | "listIssues";
+export type GitHubOperation =
+  | "listRepos"
+  | "readFile"
+  | "listIssues"
+  | "createIssue"
+  | "commentIssue"
+  | "closeIssue"
+  | "listPullRequests"
+  | "getPullRequest"
+  | "createPullRequest";
 
 /** Validated parameter shape for the github tool. */
 export interface GitHubParams {
   operation: GitHubOperation;
   repo?: string;
   path?: string;
+  title?: string;
+  body?: string;
+  number?: number;
+  head?: string;
+  base?: string;
+  state?: string;
 }
 
 /** Allowed tool names. */
-const TOOL_NAMES = ["shell", "filesystem", "browser", "github"] as const;
+const TOOL_NAMES = [
+  "shell",
+  "filesystem",
+  "browser",
+  "github",
+  "research",
+  "code",
+  "memory",
+] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 
 function isToolName(value: string): value is ToolName {
@@ -81,6 +112,35 @@ function isToolName(value: string): value is ToolName {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+/** Coerce a number or numeric string to a finite number, else null. */
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+  return null;
+}
+
+/** Coerce a value to a boolean, tolerating "true"/"false" strings. */
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+/** Read a string array (e.g. tags) from an unknown value. */
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out = value.filter((v): v is string => typeof v === "string");
+  return out.length > 0 ? out : null;
 }
 
 function parseShellParams(params: Record<string, unknown>): ShellParams | string {
@@ -168,6 +228,24 @@ const GITHUB_OPS: readonly GitHubOperation[] = [
   "listRepos",
   "readFile",
   "listIssues",
+  "createIssue",
+  "commentIssue",
+  "closeIssue",
+  "listPullRequests",
+  "getPullRequest",
+  "createPullRequest",
+];
+
+/** Operations that need a non-empty owner/name "repo". */
+const GITHUB_OPS_NEEDING_REPO: readonly GitHubOperation[] = [
+  "readFile",
+  "listIssues",
+  "createIssue",
+  "commentIssue",
+  "closeIssue",
+  "listPullRequests",
+  "getPullRequest",
+  "createPullRequest",
 ];
 
 function parseGithubParams(
@@ -184,23 +262,129 @@ function parseGithubParams(
 
   const repo = asString(params.repo) ?? undefined;
   const path = asString(params.path) ?? undefined;
+  const title = asString(params.title) ?? undefined;
+  const body = asString(params.body) ?? undefined;
+  const head = asString(params.head) ?? undefined;
+  const base = asString(params.base) ?? undefined;
+  const state = asString(params.state) ?? undefined;
+  const number = asNumber(params.number) ?? undefined;
 
-  if (op === "readFile") {
-    if (repo === undefined || repo.trim().length === 0) {
-      return 'github "readFile" requires a non-empty string "repo" parameter (format: owner/name).';
+  if (
+    (GITHUB_OPS_NEEDING_REPO as readonly string[]).includes(op) &&
+    (repo === undefined || repo.trim().length === 0)
+  ) {
+    return `github "${op}" requires a non-empty string "repo" parameter (format: owner/name).`;
+  }
+
+  if (op === "readFile" && (path === undefined || path.trim().length === 0)) {
+    return 'github "readFile" requires a non-empty string "path" parameter.';
+  }
+  if (op === "createIssue" && (title === undefined || title.trim().length === 0)) {
+    return 'github "createIssue" requires a non-empty string "title" parameter.';
+  }
+  if (op === "commentIssue") {
+    if (number === undefined) {
+      return 'github "commentIssue" requires a numeric "number" parameter (the issue number).';
     }
-    if (path === undefined || path.trim().length === 0) {
-      return 'github "readFile" requires a non-empty string "path" parameter.';
+    if (body === undefined || body.trim().length === 0) {
+      return 'github "commentIssue" requires a non-empty string "body" parameter.';
+    }
+  }
+  if ((op === "closeIssue" || op === "getPullRequest") && number === undefined) {
+    return `github "${op}" requires a numeric "number" parameter.`;
+  }
+  if (op === "createPullRequest") {
+    if (title === undefined || title.trim().length === 0) {
+      return 'github "createPullRequest" requires a non-empty string "title" parameter.';
+    }
+    if (head === undefined || head.trim().length === 0) {
+      return 'github "createPullRequest" requires a non-empty string "head" parameter (the source branch).';
+    }
+    if (base === undefined || base.trim().length === 0) {
+      return 'github "createPullRequest" requires a non-empty string "base" parameter (the target branch).';
     }
   }
 
-  if (op === "listIssues") {
-    if (repo === undefined || repo.trim().length === 0) {
-      return 'github "listIssues" requires a non-empty string "repo" parameter (format: owner/name).';
-    }
-  }
+  return { operation: op, repo, path, title, body, number, head, base, state };
+}
 
-  return { operation: op, repo, path };
+// ---- research / code / memory params ---------------------------------------
+
+/** Validated parameter shape for the research tool. */
+export interface ResearchParams {
+  query: string;
+  maxResults?: number;
+  fetchPages?: boolean;
+}
+
+function parseResearchParams(
+  params: Record<string, unknown>,
+): ResearchParams | string {
+  const query = asString(params.query);
+  if (query === null || query.trim().length === 0) {
+    return 'research requires a non-empty string "query" parameter.';
+  }
+  const out: ResearchParams = { query };
+  const maxResults = asNumber(params.maxResults);
+  if (maxResults !== null) out.maxResults = Math.max(1, Math.min(10, Math.round(maxResults)));
+  const fetchPages = asBoolean(params.fetchPages);
+  if (fetchPages !== null) out.fetchPages = fetchPages;
+  return out;
+}
+
+/** Validated parameter shape for the code tool. */
+export interface CodeParams {
+  code?: string;
+  tasks?: string[];
+  timeoutMs?: number;
+}
+
+function parseCodeParams(params: Record<string, unknown>): CodeParams | string {
+  const code = asString(params.code) ?? undefined;
+  const tasks = asStringArray(params.tasks) ?? undefined;
+  if (code === undefined && tasks === undefined) {
+    return 'code requires a string "code" parameter, or a "tasks" array of JS snippets to run in parallel.';
+  }
+  const out: CodeParams = {};
+  if (code !== undefined) out.code = code;
+  if (tasks !== undefined) out.tasks = tasks;
+  const timeoutMs = asNumber(params.timeoutMs);
+  if (timeoutMs !== null) out.timeoutMs = Math.max(50, Math.round(timeoutMs));
+  return out;
+}
+
+/** Validated parameter shape for the memory tool. */
+export interface MemoryParams {
+  operation: "remember" | "recall";
+  content?: string;
+  query?: string;
+  tags?: string[];
+  topK?: number;
+}
+
+function parseMemoryParams(params: Record<string, unknown>): MemoryParams | string {
+  const operation = asString(params.operation);
+  if (operation !== "remember" && operation !== "recall") {
+    return 'memory requires "operation" to be "remember" or "recall".';
+  }
+  if (operation === "remember") {
+    const content = asString(params.content);
+    if (content === null || content.trim().length === 0) {
+      return 'memory "remember" requires a non-empty string "content" parameter.';
+    }
+    const out: MemoryParams = { operation, content };
+    const tags = asStringArray(params.tags);
+    if (tags !== null) out.tags = tags;
+    return out;
+  }
+  const query = asString(params.query);
+  if (query === null || query.trim().length === 0) {
+    return 'memory "recall" requires a non-empty string "query" parameter.';
+  }
+  const out: MemoryParams = { operation, query };
+  const topK = asNumber(params.topK);
+  if (topK !== null) out.topK = Math.max(1, Math.min(20, Math.round(topK)));
+  return out;
 }
 
 // ---- Dispatch --------------------------------------------------------------
@@ -210,6 +394,18 @@ function formatShellResult(r: ShellResult): string {
   lines.push(`stdout:\n${r.stdout.length > 0 ? r.stdout : "(empty)"}`);
   lines.push(`stderr:\n${r.stderr.length > 0 ? r.stderr : "(empty)"}`);
   return lines.join("\n");
+}
+
+/** Render BM25 recall hits into a compact, model-readable summary. */
+function formatRecallHits(query: string, hits: RecallHit[]): string {
+  if (hits.length === 0) {
+    return `No stored memories matched "${query}".`;
+  }
+  const lines = hits.map(
+    (h, i) =>
+      `${i + 1}. (score ${h.score.toFixed(2)}${h.tags.length > 0 ? `, tags: ${h.tags.join(", ")}` : ""}) ${h.excerpt}`,
+  );
+  return [`Top ${hits.length} memory match(es) for "${query}":`, ...lines].join("\n");
 }
 
 async function dispatchBrowser(p: BrowserParams): Promise<string> {
@@ -302,6 +498,12 @@ export async function executeTool(
       const raw = await connector.executeAction(parsed.operation, {
         repo: parsed.repo,
         path: parsed.path,
+        title: parsed.title,
+        body: parsed.body,
+        number: parsed.number,
+        head: parsed.head,
+        base: parsed.base,
+        state: parsed.state,
       });
       let serialized = JSON.stringify(raw, null, 2);
       // Cap very long output to ~4000 chars to keep context manageable.
@@ -309,6 +511,46 @@ export async function executeTool(
         serialized = serialized.slice(0, 4000) + "\n... (output truncated)";
       }
       return { success: true, result: serialized };
+    }
+
+    if (name === "research") {
+      if (!isBrowserAvailable()) {
+        return { success: false, result: "", error: BROWSER_UNAVAILABLE_MESSAGE };
+      }
+      const parsed = parseResearchParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const options: { maxResults?: number; fetchPages?: boolean } = {};
+      if (parsed.maxResults !== undefined) options.maxResults = parsed.maxResults;
+      if (parsed.fetchPages !== undefined) options.fetchPages = parsed.fetchPages;
+      const result = await registry.research.research(parsed.query, options);
+      return { success: true, result };
+    }
+
+    if (name === "code") {
+      const parsed = parseCodeParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const result =
+        parsed.tasks !== undefined && parsed.tasks.length > 0
+          ? await registry.code.runMany(parsed.tasks, parsed.timeoutMs)
+          : await registry.code.runJs(parsed.code ?? "", parsed.timeoutMs);
+      return { success: true, result };
+    }
+
+    if (name === "memory") {
+      const parsed = parseMemoryParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      if (parsed.operation === "remember") {
+        const saved = registry.memory.remember(parsed.content ?? "", parsed.tags);
+        return { success: true, result: `Remembered (id ${saved.id}).` };
+      }
+      const hits = registry.memory.recall(parsed.query ?? "", parsed.topK);
+      return { success: true, result: formatRecallHits(parsed.query ?? "", hits) };
     }
 
     // name === "browser"
@@ -332,4 +574,9 @@ export { executeTool as executetool };
 /** Cleanly shut down the shared browser instance. */
 export async function closeBrowser(): Promise<void> {
   await registry.browser.close();
+}
+
+/** Cleanly shut down the research tool's browser instance. */
+export async function closeResearch(): Promise<void> {
+  await registry.research.close();
 }

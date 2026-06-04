@@ -10,7 +10,17 @@ import { renderPlan } from "./plan.js";
  */
 export const AgentResponseSchema = z.object({
   thought: z.string(),
-  action: z.enum(["shell", "filesystem", "browser", "github", "done", "stuck"]),
+  action: z.enum([
+    "shell",
+    "filesystem",
+    "browser",
+    "github",
+    "research",
+    "code",
+    "memory",
+    "done",
+    "stuck",
+  ]),
   params: z.record(z.unknown()).default({}),
   message: z.string().optional(),
   // Optional plan-progress signal. When present the loop updates the matching
@@ -43,13 +53,25 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 3. browser — drive a headless Chromium browser.
    params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "getHtml", "url": "string (for navigate)", "selector": "string (for click/type)", "text": "string (for type)" }
 
-4. github — read-only GitHub access (requires the GITHUB_TOKEN environment variable).
-   params: { "operation": "listRepos" | "readFile" | "listIssues", "repo": "owner/name (for readFile and listIssues)", "path": "file path within the repo (for readFile)" }
+4. github — GitHub access (requires the GITHUB_TOKEN environment variable). Read AND write operations.
+   params: { "operation": "listRepos" | "readFile" | "listIssues" | "createIssue" | "commentIssue" | "closeIssue" | "listPullRequests" | "getPullRequest" | "createPullRequest",
+             "repo": "owner/name", "path": "file path (readFile)", "title": "(createIssue/createPullRequest)",
+             "body": "(createIssue/commentIssue/createPullRequest)", "number": "issue or PR number (commentIssue/closeIssue/getPullRequest)",
+             "head": "source branch (createPullRequest)", "base": "target branch (createPullRequest)", "state": "open|closed|all (listPullRequests)" }
 
-5. done — the task is fully complete. Put the final answer to the user in "message".
+5. research — research the web for a query (headless browser, no API key). Returns a digest of top results.
+   params: { "query": "string", "maxResults": number (optional, default 5), "fetchPages": boolean (optional — also fetch the top pages' text) }
+
+6. code — run a snippet of JavaScript in a sandboxed, resource-limited worker thread and return its output.
+   params: { "code": "string (JS source)", "timeoutMs": number (optional) }  OR  { "tasks": ["js source", "js source", ...] } to run several in parallel.
+
+7. memory — durable long-term memory, searchable with keyword (BM25) ranking.
+   params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "query": "search text (recall)", "topK": number (optional) }
+
+8. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-6. stuck — you cannot proceed without the user. Explain what you need in "message".
+9. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -75,7 +97,7 @@ ${renderPlan(opts.phases ?? [])}`
     : "";
 
   return `You are Open Agent, an autonomous AI agent that executes tasks end-to-end on the user's machine.
-You plan, act with real tools (shell, filesystem, browser, github), observe the results, and self-correct on failure.
+You plan, act with real tools (shell, filesystem, browser, github, research, code, memory), observe the results, and self-correct on failure.
 You work until the task is fully done. You do NOT stop to ask questions unless you are completely stuck.
 
 # Persistent memory (AGENT.md)
@@ -92,7 +114,7 @@ ${TOOL_REFERENCE}${planSection}
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
-  "action": "shell | filesystem | browser | github | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | done | stuck",
   "params": { ... },
   "message": "what to show the user (optional)",
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }

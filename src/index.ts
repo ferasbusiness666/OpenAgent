@@ -30,7 +30,14 @@ import { getProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
 import { Planner } from "./agent/plan.js";
 import { SessionManager, type AgentState } from "./memory/session-manager.js";
-import { closeBrowser, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./tools/index.js";
+import { Scheduler } from "./scheduler/scheduler.js";
+import {
+  closeBrowser,
+  closeResearch,
+  closeWorkerPool,
+  isBrowserAvailable,
+  BROWSER_UNAVAILABLE_MESSAGE,
+} from "./tools/index.js";
 import { TelegramBridge } from "./telegram/bridge.js";
 import { App } from "./ui/App.js";
 
@@ -100,8 +107,16 @@ async function main(): Promise<void> {
   }
   const sessionId = resumedState?.sessionId ?? resumeId ?? sessionManager.newSessionId();
 
+  // The scheduler's in-process poller (interactive mode only); torn down on exit.
+  let scheduler: Scheduler | null = null;
+
   const cleanup = async (): Promise<void> => {
+    if (scheduler) {
+      scheduler.stop();
+    }
     await closeBrowser();
+    await closeResearch();
+    await closeWorkerPool();
   };
   process.on("SIGINT", () => {
     void cleanup().finally(() => process.exit(0));
@@ -219,6 +234,17 @@ async function main(): Promise<void> {
     );
   }
 
+  // Start the file-based scheduler (~/.openagent/schedules.json). When a
+  // schedule is due and the agent is idle, run its task; the poll timer is
+  // unref'd so it never keeps the process alive on its own.
+  scheduler = new Scheduler();
+  scheduler.on("due", (due) => {
+    if (!loop.isRunning()) {
+      void loop.run(due.task);
+    }
+  });
+  scheduler.start();
+
   // Start the Telegram bridge if configured.
   if (config.telegramToken.trim().length > 0) {
     if (config.telegramChatId.trim().length > 0) {
@@ -241,6 +267,7 @@ async function main(): Promise<void> {
         session,
         project,
         browserAvailable: browserOk,
+        scheduler: scheduler ?? undefined,
       }),
     );
     await app.waitUntilExit();

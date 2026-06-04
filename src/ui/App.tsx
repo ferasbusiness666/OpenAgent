@@ -38,6 +38,12 @@ import { SettingsScreen } from "./SettingsScreen.js";
 import { ModelPicker } from "./ModelPicker.js";
 import { ProviderPicker } from "./ProviderPicker.js";
 import { SessionsPanel } from "./SessionsPanel.js";
+import { WorkerPanel } from "./WorkerPanel.js";
+import { getWorkerPool } from "../workers/pool.js";
+import type { WorkerStatus } from "../workers/types.js";
+import { LongTermMemory } from "../memory/longterm.js";
+import type { Scheduler } from "../scheduler/scheduler.js";
+import type { Schedule, ScheduleTrigger } from "../scheduler/types.js";
 
 /** A single rendered entry in the chat transcript. */
 export type UIMessage =
@@ -71,6 +77,9 @@ type Overlay =
   | "tools"
   | "history"
   | "sessions"
+  | "workers"
+  | "memory"
+  | "schedule"
   | "help";
 
 interface AppProps {
@@ -85,6 +94,8 @@ interface AppProps {
   browserAvailable?: boolean;
   /** When set, skip project selection and immediately run this task (headless/tests). */
   initialTask?: string;
+  /** Shared scheduler instance (the same one the background poller drives). */
+  scheduler?: Scheduler;
 }
 
 function errText(err: unknown): string {
@@ -178,6 +189,45 @@ function historyToUI(history: Message[]): UIMessage[] {
   return out;
 }
 
+/**
+ * Parse a `/schedule add` spec into a trigger:
+ *   "HH:MM"        → daily at that local time
+ *   "30s"/"5m"/"2h"/"500" → repeating interval (bare number = milliseconds)
+ *   an ISO date/time → one-shot at that instant
+ * Returns null when the spec is not recognized.
+ */
+function parseScheduleSpec(spec: string): ScheduleTrigger | null {
+  const s = spec.trim();
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(s)) {
+    return { type: "daily", time: s };
+  }
+  const dur = /^(\d+)(ms|s|m|h)?$/.exec(s);
+  if (dur) {
+    const n = Number(dur[1]);
+    const unit = dur[2] ?? "ms";
+    const mult = unit === "h" ? 3600000 : unit === "m" ? 60000 : unit === "s" ? 1000 : 1;
+    const everyMs = n * mult;
+    return everyMs > 0 ? { type: "interval", everyMs } : null;
+  }
+  const at = Date.parse(s);
+  if (!Number.isNaN(at)) {
+    return { type: "once", at: new Date(at).toISOString() };
+  }
+  return null;
+}
+
+/** One-line human description of a schedule trigger. */
+function describeTrigger(t: ScheduleTrigger): string {
+  switch (t.type) {
+    case "interval":
+      return `every ${t.everyMs}ms`;
+    case "once":
+      return `once at ${new Date(t.at).toLocaleString()}`;
+    case "daily":
+      return `daily at ${t.time}`;
+  }
+}
+
 export function App({
   agentLoop,
   providerName,
@@ -186,6 +236,7 @@ export function App({
   project,
   browserAvailable = true,
   initialTask,
+  scheduler,
 }: AppProps) {
   const { exit } = useApp();
   const [mode, setMode] = useState<Mode>(project || initialTask ? "chat" : "projects");
@@ -203,6 +254,8 @@ export function App({
   // The agent's multi-phase plan (populated by the loop's plan/phaseUpdate events;
   // seeded from a resumed session via the loop's current plan).
   const [phases, setPhases] = useState<Phase[]>(() => agentLoop.plan);
+  // Live snapshot of the parallel worker pool (Phase 4 visualization).
+  const [workers, setWorkers] = useState<WorkerStatus[]>([]);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
   const [, setResizeTick] = useState(0);
 
@@ -287,6 +340,18 @@ export function App({
       agentLoop.off("phaseUpdate", onPhaseUpdate);
     };
   }, [agentLoop, push]);
+
+  // Subscribe to the worker pool so the UI reflects parallel job activity live.
+  useEffect(() => {
+    const pool = getWorkerPool();
+    const onSnapshot = (all: WorkerStatus[]) => setWorkers(all);
+    pool.on("snapshot", onSnapshot);
+    // Seed with whatever is already known.
+    setWorkers(pool.getStatuses());
+    return () => {
+      pool.off("snapshot", onSnapshot);
+    };
+  }, []);
 
   const submitTask = useCallback(
     (task: string) => {
@@ -437,7 +502,7 @@ export function App({
   // ---- Slash command dispatch ----------------------------------------------
 
   const runCommand = useCallback(
-    (name: string) => {
+    (name: string, args: string) => {
       switch (name) {
         case "/settings":
           setOverlay("settings");
@@ -457,6 +522,65 @@ export function App({
         case "/provider":
           setOverlay("provider");
           break;
+        case "/workers":
+          setOverlay("workers");
+          break;
+        case "/memory": {
+          const query = args.trim();
+          if (query.length === 0) {
+            setOverlay("memory");
+            break;
+          }
+          const hits = new LongTermMemory().recall(query, 5);
+          if (hits.length === 0) {
+            push({ kind: "agent", text: `No stored memories matched "${query}".` });
+          } else {
+            const body = hits
+              .map((h, i) => `${i + 1}. (${h.score.toFixed(2)}) ${h.excerpt}`)
+              .join("\n");
+            push({ kind: "agent", text: `Memory matches for "${query}":\n${body}` });
+          }
+          break;
+        }
+        case "/schedule": {
+          if (!scheduler) {
+            push({ kind: "error", text: "Scheduling isn't available in this context." });
+            break;
+          }
+          const rest = args.trim();
+          if (rest.length === 0) {
+            setOverlay("schedule");
+            break;
+          }
+          const sub = rest.split(/\s+/)[0]?.toLowerCase() ?? "";
+          const tail = rest.slice(sub.length).trim();
+          if (sub === "remove" || sub === "rm") {
+            const ok = tail.length > 0 && scheduler.remove(tail);
+            push({
+              kind: ok ? "agent" : "error",
+              text: ok ? `Removed schedule ${tail}.` : `No schedule with id "${tail}".`,
+            });
+          } else if (sub === "add") {
+            const spec = tail.split(/\s+/)[0] ?? "";
+            const task = tail.slice(spec.length).trim();
+            const trigger = parseScheduleSpec(spec);
+            if (trigger === null || task.length === 0) {
+              push({
+                kind: "error",
+                text: 'Usage: /schedule add <HH:MM | 30s/5m/2h | ISO-time> <task>',
+              });
+            } else {
+              const created = scheduler.add({ task, trigger });
+              push({
+                kind: "agent",
+                text: `Scheduled "${task}" (${describeTrigger(created.trigger)}) — id ${created.id}.`,
+              });
+            }
+          } else {
+            setOverlay("schedule");
+          }
+          break;
+        }
         case "/help":
           setOverlay("help");
           break;
@@ -471,7 +595,7 @@ export function App({
           push({ kind: "error", text: `Unknown command: ${name}. Type /help.` });
       }
     },
-    [session, push, agentLoop],
+    [session, push, agentLoop, scheduler],
   );
 
   // ---- Overlay submit handlers ---------------------------------------------
@@ -550,7 +674,9 @@ export function App({
         if (text.startsWith("/")) {
           const cmd = resolveCommand(text);
           if (cmd) {
-            runCommand(cmd.name);
+            const firstSpace = text.indexOf(" ");
+            const args = firstSpace === -1 ? "" : text.slice(firstSpace + 1).trim();
+            runCommand(cmd.name, args);
           } else {
             push({ kind: "error", text: `Unknown command: ${commandToken(text)}. Type /help.` });
           }
@@ -579,7 +705,15 @@ export function App({
       }
       setOverlay("none");
     },
-    { isActive: overlay === "tools" || overlay === "history" || overlay === "help" },
+    {
+      isActive:
+        overlay === "tools" ||
+        overlay === "history" ||
+        overlay === "help" ||
+        overlay === "workers" ||
+        overlay === "memory" ||
+        overlay === "schedule",
+    },
   );
 
   // ---- Render ---------------------------------------------------------------
@@ -600,6 +734,8 @@ export function App({
           <ChatView messages={messages} />
 
           {phases.length > 0 ? <PlanView phases={phases} /> : null}
+
+          {workers.length > 0 && overlay === "none" ? <WorkerPanel workers={workers} /> : null}
 
           {overlay === "none" ? (
             <>
@@ -657,6 +793,9 @@ export function App({
 
           {overlay === "tools" ? <ToolsPanel browserAvailable={browserAvailable} /> : null}
           {overlay === "history" ? <HistoryPanel session={session} /> : null}
+          {overlay === "workers" ? <WorkersOverlay workers={workers} /> : null}
+          {overlay === "memory" ? <MemoryPanel /> : null}
+          {overlay === "schedule" ? <SchedulePanel scheduler={scheduler} /> : null}
           {overlay === "help" ? <HelpPanel /> : null}
 
           {!browserAvailable && overlay === "none" ? (
@@ -725,6 +864,91 @@ function PlanView({ phases }: PlanViewProps) {
 
 // ---- Read-only info panels --------------------------------------------------
 
+/** Overlay variant of the worker view (/workers): shows a hint when idle. */
+function WorkersOverlay({ workers }: { workers: WorkerStatus[] }) {
+  if (workers.length === 0) {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1} marginTop={1}>
+        <Text color="magenta" bold>
+          Workers
+        </Text>
+        <Text color="gray">{"  (no worker activity yet — the code tool runs JS jobs here)"}</Text>
+        <Text color="gray">Press any key to close.</Text>
+      </Box>
+    );
+  }
+  return (
+    <Box flexDirection="column">
+      <WorkerPanel workers={workers} />
+      <Text color="gray">Press any key to close.</Text>
+    </Box>
+  );
+}
+
+/** Long-term memory listing (/memory). */
+function MemoryPanel() {
+  const notes = useMemo(() => {
+    try {
+      return new LongTermMemory().list();
+    } catch {
+      return [];
+    }
+  }, []);
+  const recent = notes.slice(0, 12);
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text color="cyan" bold>
+        Long-term memory ({notes.length} note{notes.length === 1 ? "" : "s"})
+      </Text>
+      {recent.length === 0 ? (
+        <Text color="gray">{"  (nothing remembered yet — the agent stores notes via the memory tool)"}</Text>
+      ) : (
+        recent.map((n) => (
+          <Box key={n.id}>
+            <Text color="white">
+              {"  • "}
+              {n.excerpt}
+            </Text>
+            {n.tags.length > 0 ? <Text color="gray"> [{n.tags.join(", ")}]</Text> : null}
+          </Box>
+        ))
+      )}
+      <Text color="gray">{"Tip: /memory <query> to search. Press any key to close."}</Text>
+    </Box>
+  );
+}
+
+/** Schedule listing (/schedule). */
+function SchedulePanel({ scheduler }: { scheduler?: Scheduler }) {
+  const schedules: Schedule[] = useMemo(() => (scheduler ? scheduler.list() : []), [scheduler]);
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text color="cyan" bold>
+        Schedules ({schedules.length})
+      </Text>
+      {schedules.length === 0 ? (
+        <Text color="gray">{"  (none yet — add one with /schedule add <spec> <task>)"}</Text>
+      ) : (
+        schedules.map((s) => (
+          <Box key={s.id} flexDirection="column">
+            <Text color={s.enabled ? "white" : "gray"}>
+              {"  "}
+              {s.enabled ? "●" : "○"} {describeTrigger(s.trigger)} — {s.task}
+            </Text>
+            <Text color="gray">
+              {"      id "}
+              {s.id}
+            </Text>
+          </Box>
+        ))
+      )}
+      <Text color="gray">
+        {"add: /schedule add 30s|5m|HH:MM <task> · remove: /schedule remove <id>. Press any key to close."}
+      </Text>
+    </Box>
+  );
+}
+
 interface ToolsPanelProps {
   browserAvailable: boolean;
 }
@@ -740,6 +964,18 @@ function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
         ? "navigate / click / type / screenshot / extractText / getHtml (headless Chromium)"
         : "unavailable — run npx playwright install chromium to enable",
     },
+    {
+      name: "github",
+      detail: "repos / files / issues + create/comment/close issues & pull requests (needs GITHUB_TOKEN)",
+    },
+    {
+      name: "research",
+      detail: browserAvailable
+        ? "web research — search + digest top results (no API key)"
+        : "unavailable — needs the browser (npx playwright install chromium)",
+    },
+    { name: "code", detail: "run sandboxed JavaScript in resource-limited worker threads (parallel)" },
+    { name: "memory", detail: "long-term memory — remember / recall with BM25 keyword search" },
   ];
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
