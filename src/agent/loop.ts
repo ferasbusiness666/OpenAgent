@@ -6,7 +6,7 @@ import { AgentMemory } from "../memory/agent-md.js";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
 import {
   AgentResponseSchema,
-  buildPrompt,
+  buildGenerateRequest,
   type AgentResponse,
 } from "./planner.js";
 import { Planner, type Phase } from "./plan.js";
@@ -275,7 +275,7 @@ export class AgentLoop extends EventEmitter {
       }
 
       for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
-        const prompt = buildPrompt({
+        const request = buildGenerateRequest({
           agentMd: this.agentMemory.getContent(),
           workspacePath: this.workspacePath,
           history: this.session.getHistory(),
@@ -283,10 +283,10 @@ export class AgentLoop extends EventEmitter {
           phases: this.phases,
         });
 
-        // ---- Ask the provider -------------------------------------------------
+        // ---- Ask the provider (stable system prefix → prompt-cache hits) -----
         let raw: string;
         try {
-          raw = await this.provider.complete(prompt);
+          raw = await this.provider.generate(request);
         } catch (err) {
           this.emit("error", `Provider call failed: ${errMessage(err)}`);
           return;
@@ -453,7 +453,7 @@ export class AgentLoop extends EventEmitter {
             corrector.reset();
             this.session.add({
               role: "tool_result",
-              content: `[${response.action}] ${result.result}`,
+              content: `[${response.action}] ${compressObservation(result.result)}`,
               timestamp: new Date(),
             });
           } else {
@@ -552,6 +552,25 @@ function truncate(text: string, max: number): string {
 /** Promise that resolves after `ms` milliseconds (used for retry back-off). */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Cap a tool observation kept in the MODEL context (head + tail) so a huge
+ * output doesn't bloat the prompt and blow the cache window. The UI still shows
+ * the full result via the toolResult event; only the model-context copy stored
+ * in session history is trimmed.
+ */
+function compressObservation(text: string, max = 6000): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const head = text.slice(0, 4000);
+  const tail = text.slice(-1500);
+  const omitted = text.length - head.length - tail.length;
+  return (
+    `${head}\n\n... [${omitted} characters omitted to save context — ` +
+    `re-run with a narrower query/path if you need the rest] ...\n\n${tail}`
+  );
 }
 
 function errMessage(err: unknown): string {

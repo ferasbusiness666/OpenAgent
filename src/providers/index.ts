@@ -1,17 +1,23 @@
 import { getConfig, type Config } from "../config/index.js";
 import { CLIProvider } from "./cli.js";
 import { APIProvider } from "./api.js";
+import type { GenerateRequest } from "./messages.js";
 
 /**
- * Uniform interface the agent loop programs against. Each turn it assembles one
- * full prompt string (system prompt + conversation history + JSON-format
- * instructions) and calls `complete`, expecting raw model text back.
+ * Uniform interface the agent loop programs against. Each turn it assembles a
+ * {@link GenerateRequest} — a stable, cacheable `system` prefix plus the
+ * role-tagged message history — and calls `generate`, expecting raw model text
+ * back (the JSON action object, which the loop parses).
+ *
+ * API providers send the system prefix in a way their prompt cache can reuse;
+ * CLI providers flatten the request back into a single text prompt.
  */
 export interface Provider {
   readonly name: string;
-  complete(prompt: string): Promise<string>;
+  generate(request: GenerateRequest): Promise<string>;
 }
 
+export type { ChatRole, ChatMessage, GenerateRequest } from "./messages.js";
 export { CLIProvider } from "./cli.js";
 export { APIProvider } from "./api.js";
 export { KNOWN_CLIS, detectClis } from "./detector.js";

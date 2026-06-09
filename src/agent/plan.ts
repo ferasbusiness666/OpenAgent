@@ -119,7 +119,10 @@ export class Planner {
     const p = provider ?? this.provider;
     let raw: string;
     try {
-      raw = await p.complete(buildPlanningPrompt(goal));
+      raw = await p.generate({
+        system: "You are the planning module of Open Agent.",
+        messages: [{ role: "user", content: buildPlanningPrompt(goal) }],
+      });
     } catch {
       return fallback();
     }

@@ -7,12 +7,19 @@ import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
 import type { Provider } from "../src/providers/index.js";
+import type { GenerateRequest } from "../src/providers/messages.js";
 import { App } from "../src/ui/App.js";
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-ui";
   private calls = 0;
-  async complete(_prompt: string): Promise<string> {
+
+  /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
+  async complete(prompt: string): Promise<string> {
+    return this.generate({ system: prompt, messages: [] });
+  }
+
+  async generate(_request: GenerateRequest): Promise<string> {
     this.calls += 1;
     if (this.calls === 1) {
       // First call is now the PLANNING call — return a JSON phase array.

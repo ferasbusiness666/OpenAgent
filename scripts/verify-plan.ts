@@ -12,13 +12,19 @@ import { AgentMemory } from "../src/memory/agent-md.js";
 import { SessionManager } from "../src/memory/session-manager.js";
 import type { Phase } from "../src/agent/plan.js";
 import type { Provider } from "../src/providers/index.js";
+import type { GenerateRequest } from "../src/providers/messages.js";
 import { setActiveWorkspace } from "../src/config/index.js";
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-plan";
   private calls = 0;
 
-  async complete(_prompt: string): Promise<string> {
+  /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
+  async complete(prompt: string): Promise<string> {
+    return this.generate({ system: prompt, messages: [] });
+  }
+
+  async generate(_request: GenerateRequest): Promise<string> {
     this.calls += 1;
     if (this.calls === 1) {
       // Planning call — return an ordered JSON phase array.

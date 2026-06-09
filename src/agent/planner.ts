@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Message } from "../memory/session.js";
 import type { Phase } from "./plan.js";
 import { renderPlan } from "./plan.js";
+import type { GenerateRequest, ChatMessage } from "../providers/messages.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
@@ -77,25 +78,17 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 export interface SystemPromptOptions {
   agentMd: string;
   workspacePath: string;
-  now: Date;
-  /** When present, the current multi-phase plan is injected and enforced. */
-  phases?: Phase[];
 }
 
-/** Build the system prompt injected at the top of every provider call. */
+/**
+ * Build the STABLE system prefix sent (and cached) on every turn. It must stay
+ * byte-for-byte identical across a session so each provider's prompt cache hits,
+ * so volatile content — the current time and the live plan — is deliberately
+ * NOT here. The loop puts those in the final user message (see
+ * {@link buildGenerateRequest}), which keeps the cache prefix stable and keeps
+ * the goal in recent attention (recitation).
+ */
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
-  const hasPlan = opts.phases !== undefined && opts.phases.length > 0;
-  const planSection = hasPlan
-    ? `
-
-# Current plan
-${renderPlan(opts.phases ?? [])}`
-    : "";
-  const planRule = hasPlan
-    ? `
-- Work through the plan phase by phase. When you start a phase set progress.status='in_progress' for that phase id; when you finish one set 'completed' (or 'failed') and include a short 'finding'. Use action 'done' only when ALL phases are complete.`
-    : "";
-
   return `You are Open Agent, an autonomous AI agent that executes tasks end-to-end on the user's machine.
 You plan, act with real tools (shell, filesystem, browser, github, research, code, memory), observe the results, and self-correct on failure.
 You work until the task is fully done. You do NOT stop to ask questions unless you are completely stuck.
@@ -105,10 +98,9 @@ ${opts.agentMd}
 
 # Environment
 - Workspace path (all file and shell operations happen here): ${opts.workspacePath}
-- Current date and time: ${opts.now.toString()}
 
 # Tools
-${TOOL_REFERENCE}${planSection}
+${TOOL_REFERENCE}
 
 # Response format — THIS IS MANDATORY
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
@@ -127,22 +119,29 @@ Rules:
 - Never ask the user a question unless your action is "stuck".
 - Always take the next concrete action that moves the task forward.
 - Use exactly one action per response. Look at the latest TOOL RESULT before deciding the next step.
-- When the task is finished, use action "done" and put the final answer in "message".${planRule}`;
+- When the task is finished, use action "done" and put the final answer in "message".
+- When a plan is shown in the current turn, work through it phase by phase: report progress via the "progress" field (phase id + status + a short finding), and use action "done" only when ALL phases are complete.`;
 }
 
-/** Render the running conversation/tool history into the prompt body. */
-export function renderHistory(messages: Message[]): string {
-  if (messages.length === 0) {
-    return "(no history yet)";
+/**
+ * Map the session history into provider chat messages (user/assistant only).
+ * We keep the JSON action protocol, so tool results and system notes are folded
+ * into `user` messages — the model reads tool output as observations.
+ */
+function mapHistory(messages: Message[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant") {
+      out.push({ role: "assistant", content: m.content });
+    } else if (m.role === "tool_result") {
+      out.push({ role: "user", content: `TOOL RESULT:\n${m.content}` });
+    } else if (m.role === "system") {
+      out.push({ role: "user", content: `SYSTEM NOTE:\n${m.content}` });
+    } else {
+      out.push({ role: "user", content: m.content });
+    }
   }
-  return messages
-    .map((m) => {
-      if (m.role === "user") return `USER:\n${m.content}`;
-      if (m.role === "assistant") return `ASSISTANT (your previous JSON response):\n${m.content}`;
-      if (m.role === "system") return `SYSTEM NOTE:\n${m.content}`;
-      return `TOOL RESULT:\n${m.content}`;
-    })
-    .join("\n\n");
+  return out;
 }
 
 export interface PromptOptions {
@@ -150,27 +149,40 @@ export interface PromptOptions {
   workspacePath: string;
   history: Message[];
   now?: Date;
-  /** Current multi-phase plan, forwarded to the system prompt. */
+  /** Current multi-phase plan, recited in the final user turn. */
   phases?: Phase[];
 }
 
 /**
- * Assemble the full single-string prompt sent to the provider each turn:
- * system prompt + rendered history + a final instruction to emit the next action.
+ * Assemble the provider request for one turn: a STABLE cacheable system prefix
+ * plus the role-tagged history. Volatile content (the current time and the
+ * recited plan) is appended to the final USER message — never to `system` — so
+ * the cache prefix stays byte-stable and the goal stays in recent attention.
  */
-export function buildPrompt(opts: PromptOptions): string {
+export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
   const system = buildSystemPrompt({
     agentMd: opts.agentMd,
     workspacePath: opts.workspacePath,
-    now: opts.now ?? new Date(),
-    phases: opts.phases,
   });
-  const history = renderHistory(opts.history);
-  return `${system}
+  const messages = mapHistory(opts.history);
 
-# Conversation and tool history so far
-${history}
+  const now = opts.now ?? new Date();
+  const hasPlan = opts.phases !== undefined && opts.phases.length > 0;
+  const planBlock = hasPlan
+    ? `\n\n# Current plan (work through it; keep it updated via "progress")\n${renderPlan(opts.phases ?? [])}`
+    : "";
+  const finalTurn =
+    `# Current context\nCurrent date and time: ${now.toString()}${planBlock}\n\n` +
+    `# Your turn\nRespond now with the SINGLE JSON object for your next action. Output only the JSON.`;
 
-# Your turn
-Respond now with the SINGLE JSON object for your next action. Output only the JSON.`;
+  // Append the volatile turn to the last user message (keeps roles alternating)
+  // or as a fresh user message if the last turn was the assistant.
+  const last = messages[messages.length - 1];
+  if (last && last.role === "user") {
+    last.content = `${last.content}\n\n${finalTurn}`;
+  } else {
+    messages.push({ role: "user", content: finalTurn });
+  }
+
+  return { system, messages };
 }

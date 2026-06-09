@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { Provider } from "./index.js";
+import type { GenerateRequest, ChatMessage } from "./messages.js";
 import { extractJsonObject } from "../util/json.js";
 
 /** Hard ceiling on a single CLI invocation, in milliseconds. */
@@ -136,7 +137,17 @@ export class CLIProvider implements Provider {
     return this.model ? `${this.cliName} (${this.model})` : this.cliName;
   }
 
-  complete(prompt: string): Promise<string> {
+  private flatten(request: GenerateRequest): string {
+    const parts: string[] = [request.system];
+    for (const m of request.messages) {
+      const label = m.role === "assistant" ? "ASSISTANT" : "USER";
+      parts.push(`${label}:\n${m.content}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  generate(request: GenerateRequest): Promise<string> {
+    const prompt = this.flatten(request);
     const cli = this.cliName;
     const args = buildArgs(cli, prompt, this.model);
 

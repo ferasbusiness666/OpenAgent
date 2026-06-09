@@ -150,18 +150,19 @@ In a non-TTY environment the UI falls back to plain console output.
 
 On startup the agent merges two memory files into its system prompt: `~/.openagent/AGENT.md` (global memory — preferences and general info about you) and `<cwd>/AGENT.md` (project-specific memory). Either is created from a template if it is missing.
 
-Every turn the agent receives a system prompt (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the current time) followed by the running history, and must reply with a single JSON object:
+Each turn the agent is sent a **stable, cacheable system prefix** (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the response-format rules) plus the running history as a **role-tagged message array**. Volatile content — the current time and the recited plan — is appended to the most recent user message, never to the system prefix. Keeping that prefix byte-for-byte stable lets each backend reuse its **prompt cache** (Anthropic `cache_control`, OpenAI/Groq automatic prefix caching, Gemini `systemInstruction`), which cuts latency and cost on long runs; reciting the plan in the recent turn keeps the goal in attention. The agent replies with a single JSON object:
 
 ```json
 {
   "thought": "internal reasoning",
   "action": "shell | filesystem | browser | github | research | code | memory | done | stuck",
   "params": {},
-  "message": "optional text for the user"
+  "message": "optional text for the user",
+  "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional" }
 }
 ```
 
-The loop executes the chosen tool, feeds the result back, and repeats. A failing step is retried with the error in context; after 3 identical failures the agent reports `stuck`.
+The loop executes the chosen tool, feeds the result back (very large outputs are head/tail-compressed to keep the context lean), and repeats. A failing step is retried with the error in context and exponential back-off; after 3 identical failures the agent reports `stuck`.
 
 The CLI provider is hardened so the loop never crashes: it enforces a hard 60s timeout (killing a hung CLI), survives CLI crashes without throwing, strips ANSI and control characters, extracts the first JSON object from noisy output, and wraps any plain-text reply as a `done` response. If a CLI returns an authentication error, it surfaces a clear "run `<cli>` once to log in, then restart" message. Per-CLI invocation:
 
