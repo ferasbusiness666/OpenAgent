@@ -9,7 +9,10 @@ import { getConfig, resolveWorkspacePath } from "../config/index.js";
 import {
   AgentResponseSchema,
   buildGenerateRequest,
+  buildReflectionRequest,
+  parseReflection,
   type AgentResponse,
+  type Reflection,
 } from "./planner.js";
 import { Planner, type Phase } from "./plan.js";
 import { SessionManager, type AgentState } from "../memory/session-manager.js";
@@ -19,6 +22,10 @@ import { randomUUID } from "node:crypto";
 
 /** Hard ceiling on provider turns per run() to prevent runaway loops. */
 const MAX_ITERATIONS = 50;
+
+/** How many times a "done" may be sent back for more work by the self-check
+ *  before it is accepted regardless (prevents an endless "not done" loop). */
+const MAX_REFLECTIONS = 2;
 
 /** The set of tool actions (vs. the terminal "done"/"stuck" actions). */
 const TOOL_ACTIONS = [
@@ -163,6 +170,26 @@ export class AgentLoop extends EventEmitter {
   }
 
   /**
+   * Ask the model to self-check the work against the goal before "done" is
+   * accepted. Returns the verdict, or null on any failure (in which case the
+   * caller accepts "done" rather than blocking).
+   */
+  private async reflect(): Promise<Reflection | null> {
+    try {
+      const request = buildReflectionRequest({
+        agentMd: this.agentMemory.getContent(),
+        workspacePath: this.workspacePath,
+        goal: this.goal,
+        history: this.session.getHistory(),
+      });
+      const raw = await this.provider.generate(request);
+      return parseReflection(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * After a successful `browser screenshot`, read the saved PNG and queue it so
    * the next provider turn can show it to a vision-capable model. Best-effort:
    * skips silently when vision is off, the path can't be parsed, or the read
@@ -273,6 +300,7 @@ export class AgentLoop extends EventEmitter {
     this.running = true;
 
     const corrector = new Corrector();
+    let reflectionCount = 0;
     this.session.add({ role: "user", content: task, timestamp: new Date() });
 
     try {
@@ -377,6 +405,26 @@ export class AgentLoop extends EventEmitter {
 
         // ---- Terminal actions -------------------------------------------------
         if (response.action === "done") {
+          // Self-critique: before accepting "done", ask the model to verify the
+          // goal is truly met. If it isn't (and we haven't nudged too many
+          // times), feed the critique back and keep working instead of stopping.
+          if (
+            getConfig().enableReflection &&
+            this.goal.trim().length > 0 &&
+            reflectionCount < MAX_REFLECTIONS
+          ) {
+            const verdict = await this.reflect();
+            if (verdict && !verdict.complete) {
+              reflectionCount += 1;
+              const note =
+                `Self-check (${reflectionCount}/${MAX_REFLECTIONS}): the goal is NOT fully complete yet. ` +
+                `${verdict.reason}${verdict.nextStep ? ` Next: ${verdict.nextStep}` : ""} ` +
+                `Keep working — do not stop until it is genuinely done.`;
+              this.emit("thought", note);
+              this.session.add({ role: "system", content: note, timestamp: new Date() });
+              continue;
+            }
+          }
           // "done" means the whole task is finished. Mark any still-open phases
           // completed so a follow-up run() with a new goal re-plans from scratch
           // (the noActivePlan gate) instead of resuming this now-stale plan.

@@ -18,6 +18,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
 - **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
+- **Self-critique** — before it accepts `done`, the agent reviews the work against the original goal; if it isn't genuinely complete it feeds the gap back and keeps going (bounded, so it never loops forever). Toggle `enableReflection` in `/settings`.
 - **Background runs** — launch a task that runs to completion in a **detached process** which outlives the terminal (`/background <task>` or `openagent --background "…"`). It streams its lifecycle to `~/.openagent/runs/<id>.log`, persists its state, and notifies on completion (Telegram + a desktop ping). List runs with `/runs` and follow one live with `/attach <id>`.
 - **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json`, fired by an in-process poller (`/schedule`); a due task launches as a background run so it never blocks the foreground agent.
 - **GitHub connector** — read **and write** GitHub access via the `github` tool (list repos, read files, list issues, create/comment/close issues, list/get/create pull requests), authenticated with the `GITHUB_TOKEN` environment variable.
@@ -117,6 +118,7 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
 | `requireCommandApproval` | When true (default), the agent pauses for your y/n approval before a shell command or real-interpreter `code` run in the TUI. |
 | `enableVision` | When true (default), screenshots the agent takes are sent to a vision-capable model so it can see web pages. |
+| `enableReflection` | When true (default), the agent self-checks its work against the goal before stopping and continues if it isn't truly done. |
 | `permSuggestEdits` / `permReadFiles` | Permission preferences from onboarding. `permSuggestEdits=false` blocks file writes/deletes; `permReadFiles` is informational (reads are always allowed). |
 | `onboardingCompleted` | Whether the first-run walkthrough has been completed/skipped. Set false (or run `/onboarding`) to replay it. |
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |

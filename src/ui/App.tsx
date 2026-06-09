@@ -169,6 +169,10 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
         if (value !== "true" && value !== "false") return { error: "enableVision must be 'true' or 'false'." };
         partial.enableVision = value === "true";
         break;
+      case "enableReflection":
+        if (value !== "true" && value !== "false") return { error: "enableReflection must be 'true' or 'false'." };
+        partial.enableReflection = value === "true";
+        break;
       default:
         // Ignore unknown keys.
         break;

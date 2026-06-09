@@ -3,6 +3,7 @@ import type { Message } from "../memory/session.js";
 import type { Phase } from "./plan.js";
 import { renderPlan } from "./plan.js";
 import type { GenerateRequest, ChatMessage, ImageData } from "../providers/messages.js";
+import { extractJsonObject } from "../util/json.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
@@ -195,4 +196,62 @@ export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
   }
 
   return { system, messages };
+}
+
+// ---- Reflection / self-critique --------------------------------------------
+
+/** A self-check verdict on whether the goal was actually accomplished. */
+export interface Reflection {
+  complete: boolean;
+  reason: string;
+  nextStep?: string;
+}
+
+/**
+ * Build the request asked of the model right before accepting "done": review
+ * the full transcript against the goal and judge whether it is truly finished.
+ */
+export function buildReflectionRequest(opts: {
+  agentMd: string;
+  workspacePath: string;
+  goal: string;
+  history: Message[];
+}): GenerateRequest {
+  const system = `You are the SELF-CHECK reviewer for Open Agent. Given the original goal and the full work transcript, judge whether the goal has been FULLY and correctly accomplished — not merely attempted. Be strict but fair: only say complete when a user would agree the task is genuinely done.
+
+Respond with ONLY a single JSON object and nothing else:
+{ "complete": true | false, "reason": "one short sentence", "nextStep": "if not complete, the single most important next action" }`;
+
+  const messages = mapHistory(opts.history);
+  const finalTurn =
+    `# Original goal\n${opts.goal}\n\n# Your turn\n` +
+    `Review the transcript above against the goal and respond now with the SINGLE JSON verdict.`;
+  const last = messages[messages.length - 1];
+  if (last && last.role === "user") {
+    last.content = `${last.content}\n\n${finalTurn}`;
+  } else {
+    messages.push({ role: "user", content: finalTurn });
+  }
+  return { system, messages };
+}
+
+/**
+ * Parse a self-check reply. Biased toward accepting "done": only an explicit
+ * `"complete": false` blocks completion, so a malformed/uncertain verdict never
+ * traps the agent in an endless "not done" loop.
+ */
+export function parseReflection(raw: string): Reflection {
+  const json = extractJsonObject(raw);
+  if (json === null) {
+    return { complete: true, reason: "" };
+  }
+  try {
+    const d = JSON.parse(json) as Record<string, unknown>;
+    const complete = d.complete === false || d.complete === "false" ? false : true;
+    const reason = typeof d.reason === "string" ? d.reason : "";
+    const nextStep = typeof d.nextStep === "string" && d.nextStep.trim().length > 0 ? d.nextStep : undefined;
+    return nextStep ? { complete, reason, nextStep } : { complete, reason };
+  } catch {
+    return { complete: true, reason: "" };
+  }
 }

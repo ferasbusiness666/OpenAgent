@@ -41,6 +41,9 @@ export const ConfigSchema = z.object({
   // Vision: when true, screenshots the agent takes are sent to vision-capable
   // API models so it can "see" web pages. Ignored by CLI / text-only providers.
   enableVision: z.boolean().default(true),
+  // Self-critique: when true, before accepting "done" the agent reviews the work
+  // against the goal and keeps going if it isn't actually complete.
+  enableReflection: z.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
