@@ -28,6 +28,7 @@ import {
 } from "./memory/session-store.js";
 import { getProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
+import { executeRun, launchBackgroundRun } from "./agent/runner.js";
 import { Planner } from "./agent/plan.js";
 import { SessionManager, type AgentState } from "./memory/session-manager.js";
 import { Scheduler } from "./scheduler/scheduler.js";
@@ -44,6 +45,8 @@ import { App } from "./ui/App.js";
 interface CliOptions {
   task?: string;
   resume?: string;
+  background?: string;
+  runDetached?: string;
 }
 
 /** Attach plain-text console listeners to the loop (headless / fallback mode). */
@@ -81,6 +84,11 @@ async function main(): Promise<void> {
     .description("Open Agent — an autonomous local AI agent")
     .option("-t, --task <task>", "run a single task non-interactively, then exit")
     .option("-r, --resume <sessionId>", "resume a previously saved session by id")
+    .option("-b, --background <task>", "run a task in a detached background process, then exit")
+    .option(
+      "--run-detached <runId>",
+      "internal: execute a registered background run (used by --background)",
+    )
     .allowExcessArguments(true);
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
@@ -89,6 +97,14 @@ async function main(): Promise<void> {
   // is deferred until AFTER the resume target is loaded (below), so resuming an
   // old session never races the cleanup that would delete its state file.
   migrateLegacyData();
+
+  // ---- Detached background worker: execute one registered run, then exit. ----
+  // This is the headless body spawned by --background; handle it FIRST so it
+  // never needs a TTY and never falls into the interactive setup flow.
+  if (options.runDetached && options.runDetached.trim().length > 0) {
+    await executeRun(options.runDetached.trim());
+    process.exit(0);
+  }
 
   let config: Config = getConfig();
   const browserOk = isBrowserAvailable();
@@ -126,6 +142,29 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => {
     void cleanup().finally(() => process.exit(0));
   });
+
+  // ---- Detached background launch: register + spawn a worker, then exit. -----
+  // Replicates Manus's "work in the background, notify when done": the task runs
+  // in a separate process that outlives this terminal and notifies on completion.
+  if (options.background && options.background.trim().length > 0) {
+    if (!isConfigComplete(config)) {
+      console.error(
+        chalk.red(
+          "No provider configured yet. Run setup once interactively, then use --background.",
+        ),
+      );
+      process.exit(1);
+    }
+    const project =
+      getProjectByPath(process.cwd()) ?? createProject(path.basename(process.cwd()) || "default");
+    touchProject(project.id);
+    const { runId } = launchBackgroundRun(options.background.trim(), project.path);
+    console.log(
+      chalk.green(`Started background run ${runId}.`) +
+        chalk.gray(` Events: ~/.openagent/runs/${runId}.log — list with 'openagent' /runs.`),
+    );
+    process.exit(0);
+  }
 
   // ---- Headless one-shot mode: run a single task and exit. -------------------
   if (options.task && options.task.trim().length > 0) {
@@ -243,10 +282,10 @@ async function main(): Promise<void> {
   // schedule is due and the agent is idle, run its task; the poll timer is
   // unref'd so it never keeps the process alive on its own.
   scheduler = new Scheduler();
+  // A due schedule launches a DETACHED background run (it runs autonomously and
+  // notifies on completion) instead of contending with the foreground loop.
   scheduler.on("due", (due) => {
-    if (!loop.isRunning()) {
-      void loop.run(due.task);
-    }
+    launchBackgroundRun(due.task, project.path);
   });
   scheduler.start();
 

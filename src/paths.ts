@@ -31,6 +31,8 @@ export const GLOBAL_AGENT_MD_PATH = path.join(DATA_DIR, "AGENT.md");
 export const MEMORY_DIR = path.join(DATA_DIR, "memory");
 /** Local scheduling store, polled by the in-process scheduler. */
 export const SCHEDULES_PATH = path.join(DATA_DIR, "schedules.json");
+/** Background-run registry: one <runId>.json record + <runId>.log (JSONL) each. */
+export const RUNS_DIR = path.join(DATA_DIR, "runs");
 
 // This module is src/paths.ts, so the install root is one level up from src/.
 // Used only to migrate data that older builds wrote into the app folder.
@@ -42,6 +44,7 @@ export function ensureDataDir(): void {
   fs.ensureDirSync(DATA_DIR);
   fs.ensureDirSync(SESSIONS_DIR);
   fs.ensureDirSync(MEMORY_DIR);
+  fs.ensureDirSync(RUNS_DIR);
 }
 
 /**

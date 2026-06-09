@@ -46,6 +46,8 @@ import type { WorkerStatus } from "../workers/types.js";
 import { LongTermMemory } from "../memory/longterm.js";
 import type { Scheduler } from "../scheduler/scheduler.js";
 import type { Schedule, ScheduleTrigger } from "../scheduler/types.js";
+import { RunStore, type RunRecord, type RunEvent } from "../agent/run-store.js";
+import { launchBackgroundRun } from "../agent/runner.js";
 
 /** A single rendered entry in the chat transcript. */
 export type UIMessage =
@@ -82,6 +84,7 @@ type Overlay =
   | "workers"
   | "memory"
   | "schedule"
+  | "runs"
   | "help";
 
 interface AppProps {
@@ -297,12 +300,145 @@ export function App({
   const [approval, setApproval] = useState<{ summary: string; resolve: (ok: boolean) => void } | null>(null);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
   const [, setResizeTick] = useState(0);
+  // Live-tailing state for /attach: tracks which background run we're following
+  // and how many events have already been appended to the message list.
+  const [attached, setAttached] = useState<{ runId: string; shown: number } | null>(null);
 
   const detectedClis = useMemo(() => detectClis(), []);
 
   const push = useCallback((message: UIMessage) => {
     setMessages((prev) => [...prev, message]);
   }, []);
+
+  // ---- Background run helpers -----------------------------------------------
+
+  /** Convert a RunEvent to a UIMessage. Returns null for events we skip. */
+  function runEventToUI(ev: RunEvent): UIMessage | null {
+    switch (ev.type) {
+      case "thought": {
+        const text = typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data);
+        return { kind: "thought", text };
+      }
+      case "toolCall": {
+        const d = ev.data as { tool?: unknown; params?: unknown };
+        const tool = typeof d.tool === "string" ? d.tool : "unknown";
+        const params =
+          d.params !== null && typeof d.params === "object" && !Array.isArray(d.params)
+            ? (d.params as Record<string, unknown>)
+            : {};
+        return { kind: "toolCall", tool, params };
+      }
+      case "toolResult": {
+        const d = ev.data as { tool?: unknown; result?: unknown; success?: unknown };
+        const tool = typeof d.tool === "string" ? d.tool : "unknown";
+        const result = typeof d.result === "string" ? d.result : JSON.stringify(d.result);
+        const success = d.success === true;
+        return { kind: "toolResult", tool, result, success };
+      }
+      case "message": {
+        const text = typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data);
+        return { kind: "agent", text };
+      }
+      case "done": {
+        const text = typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data);
+        return { kind: "done", text };
+      }
+      case "stuck": {
+        const text = typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data);
+        return { kind: "stuck", text };
+      }
+      case "error": {
+        const text = typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data);
+        return { kind: "error", text };
+      }
+      case "plan":
+      case "phaseUpdate":
+        // Could call setPhases here; for background runs we skip live plan rendering.
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  /** Load an existing background run's history into the chat and begin live-tailing. */
+  const attachToRun = useCallback((rec: RunRecord) => {
+    const store = new RunStore();
+    const events = store.readEvents(rec.runId);
+    const historyMsgs: UIMessage[] = [
+      { kind: "agent", text: `Attached to background run ${rec.runId.slice(0, 8)} (${rec.status}).` },
+    ];
+    for (const ev of events) {
+      const msg = runEventToUI(ev);
+      if (msg !== null) historyMsgs.push(msg);
+    }
+    setMessages(historyMsgs);
+    setAttached({ runId: rec.runId, shown: events.length });
+    setOverlay("none");
+    setMode("chat");
+  // runEventToUI is defined in the same render scope — no dep needed
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live-tailing effect: polls the run's event log every 800ms and appends new
+  // events as UIMessages. Uses functional setState to avoid stale closures.
+  useEffect(() => {
+    if (attached === null) return;
+    const { runId } = attached;
+    const store = new RunStore();
+    const terminal: ReadonlySet<string> = new Set(["done", "stuck", "error"]);
+
+    const id = setInterval(() => {
+      let events: RunEvent[];
+      try {
+        events = store.readEvents(runId);
+      } catch {
+        events = [];
+      }
+
+      setAttached((prev) => {
+        if (prev === null || prev.runId !== runId) return prev;
+        const newEvents = events.slice(prev.shown);
+        if (newEvents.length === 0) return prev;
+
+        const newMsgs: UIMessage[] = [];
+        for (const ev of newEvents) {
+          const msg = runEventToUI(ev);
+          if (msg !== null) newMsgs.push(msg);
+        }
+        if (newMsgs.length > 0) {
+          setMessages((prevMsgs) => [...prevMsgs, ...newMsgs]);
+        }
+        return { runId, shown: events.length };
+      });
+
+      // Check for terminal status and stop polling when the run ends.
+      let rec: RunRecord | null = null;
+      try {
+        rec = store.get(runId);
+      } catch {
+        rec = null;
+      }
+      if (rec !== null && terminal.has(rec.status)) {
+        const statusLine = rec.finalMessage
+          ? `Run ${runId.slice(0, 8)} ${rec.status}: ${rec.finalMessage}`
+          : `Run ${runId.slice(0, 8)} finished with status: ${rec.status}.`;
+        setMessages((prev) => [
+          ...prev,
+          rec!.status === "done"
+            ? { kind: "done" as const, text: statusLine }
+            : rec!.status === "stuck"
+              ? { kind: "stuck" as const, text: statusLine }
+              : { kind: "error" as const, text: statusLine },
+        ]);
+        setAttached(null);
+        clearInterval(id);
+      }
+    }, 800);
+
+    return () => clearInterval(id);
+  // runEventToUI is stable (defined at render scope); only re-run when attached runId changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attached?.runId]);
 
   // Re-render on terminal resize (SIGWINCH) so the UI reflows without crashing.
   useEffect(() => {
@@ -446,6 +582,8 @@ export function App({
     (task: string) => {
       const trimmed = task.trim();
       if (trimmed.length === 0 || busy) return;
+      // Stop tailing any background run when the user starts a new foreground task.
+      setAttached(null);
       push({ kind: "user", text: trimmed });
       setStatus({ state: "thinking" });
       setBusy(true);
@@ -685,6 +823,51 @@ export function App({
           }
           break;
         }
+        case "/background": {
+          const task = args.trim();
+          if (task.length === 0) {
+            push({ kind: "error", text: "Usage: /background <task>" });
+            break;
+          }
+          if (!currentProject) {
+            push({ kind: "error", text: "Open a project first." });
+            break;
+          }
+          try {
+            const { runId } = launchBackgroundRun(task, currentProject.path);
+            push({
+              kind: "agent",
+              text: `Started background run ${runId.slice(0, 8)}. Use /runs to list, /attach ${runId.slice(0, 8)} to follow.`,
+            });
+          } catch (err) {
+            push({ kind: "error", text: `Could not start background run: ${errText(err)}` });
+          }
+          break;
+        }
+        case "/runs":
+          setOverlay("runs");
+          break;
+        case "/attach": {
+          const id = args.trim();
+          if (id.length === 0) {
+            push({ kind: "error", text: "Usage: /attach <runId>" });
+            break;
+          }
+          const allRuns = (() => {
+            try {
+              return new RunStore().list();
+            } catch {
+              return [] as RunRecord[];
+            }
+          })();
+          const match = allRuns.find((r) => r.runId === id || r.runId.startsWith(id));
+          if (!match) {
+            push({ kind: "error", text: `No run matching "${id}".` });
+          } else {
+            attachToRun(match);
+          }
+          break;
+        }
         case "/onboarding":
           setOverlay("none");
           setMode("onboarding");
@@ -695,6 +878,7 @@ export function App({
         case "/clear":
           session?.clear();
           agentLoop.reset();
+          setAttached(null);
           setMessages([{ kind: "agent", text: "Conversation cleared. Same project, fresh start." }]);
           setPhases([]);
           setStatus({ state: "idle" });
@@ -703,7 +887,7 @@ export function App({
           push({ kind: "error", text: `Unknown command: ${name}. Type /help.` });
       }
     },
-    [session, push, agentLoop, scheduler],
+    [session, push, agentLoop, scheduler, currentProject, attachToRun],
   );
 
   // ---- Overlay submit handlers ---------------------------------------------
@@ -835,7 +1019,8 @@ export function App({
         overlay === "help" ||
         overlay === "workers" ||
         overlay === "memory" ||
-        overlay === "schedule",
+        overlay === "schedule" ||
+        overlay === "runs",
     },
   );
 
@@ -939,6 +1124,7 @@ export function App({
           {overlay === "workers" ? <WorkersOverlay workers={workers} /> : null}
           {overlay === "memory" ? <MemoryPanel /> : null}
           {overlay === "schedule" ? <SchedulePanel scheduler={scheduler} /> : null}
+          {overlay === "runs" ? <RunsPanel /> : null}
           {overlay === "help" ? <HelpPanel /> : null}
 
           {!browserAvailable && overlay === "none" ? (
@@ -1154,6 +1340,58 @@ function HelpPanel() {
         </Box>
       ))}
       <Text color="gray">Press any key to close.</Text>
+    </Box>
+  );
+}
+
+/** Background runs listing (/runs). */
+function RunsPanel() {
+  const runs = useMemo(() => {
+    try {
+      return new RunStore().list();
+    } catch {
+      return [] as RunRecord[];
+    }
+  }, []);
+
+  function statusGlyph(status: RunRecord["status"]): { glyph: string; color: string } {
+    switch (status) {
+      case "running":
+        return { glyph: "▶", color: "yellow" };
+      case "done":
+        return { glyph: "✓", color: "green" };
+      case "stuck":
+        return { glyph: "⚠", color: "yellow" };
+      case "error":
+        return { glyph: "✗", color: "red" };
+    }
+  }
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text color="cyan" bold>
+        Background runs ({runs.length})
+      </Text>
+      {runs.length === 0 ? (
+        <Text color="gray">{"  (none — start one with /background <task>)"}</Text>
+      ) : (
+        runs.map((rec) => {
+          const { glyph, color } = statusGlyph(rec.status);
+          const shortId = rec.runId.slice(0, 8);
+          const taskPreview = rec.task.length > 60 ? `${rec.task.slice(0, 60)}…` : rec.task;
+          return (
+            <Box key={rec.runId}>
+              <Text color={color}>{`  ${glyph} `}</Text>
+              <Text color="white" bold>
+                {shortId}
+              </Text>
+              <Text color="gray">{` [${rec.status}] `}</Text>
+              <Text color="white">{taskPreview}</Text>
+            </Box>
+          );
+        })
+      )}
+      <Text color="gray">/attach &lt;id&gt; to follow · press any key to close.</Text>
     </Box>
   );
 }
