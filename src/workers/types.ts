@@ -8,18 +8,20 @@
  * resorting to `any`.
  */
 
-/** The two kinds of work a worker can perform. */
-export type WorkerJobKind = "shell" | "js";
+/** The kinds of work a worker can perform. */
+export type WorkerJobKind = "shell" | "js" | "exec";
 
 /** A unit of work submitted to the pool. */
 export interface WorkerJob {
   id: string;
   kind: WorkerJobKind;
-  /** For "shell": the command line. For "js": the JS source to evaluate. */
+  /** For "shell": the command line. For "js"/"exec": the source to evaluate/run. */
   source: string;
+  /** For "exec": the language to run `source` as (e.g. "python", "bash"). */
+  language?: string;
   /** Per-job wall-clock timeout (ms). Pool applies a default when omitted. */
   timeoutMs?: number;
-  /** Working directory for "shell" jobs. */
+  /** Working directory for "shell" / "exec" jobs. */
   cwd?: string;
 }
 
@@ -54,7 +56,7 @@ export interface WorkerResult {
   output: string;
   error?: string;
   durationMs: number;
-  engine?: "isolated-vm" | "vm" | "shell";
+  engine?: "isolated-vm" | "vm" | "shell" | "exec";
 }
 
 /**
@@ -68,5 +70,5 @@ export type WorkerMessage =
       success: boolean;
       output: string;
       error?: string;
-      engine: "isolated-vm" | "vm" | "shell";
+      engine: "isolated-vm" | "vm" | "shell" | "exec";
     };

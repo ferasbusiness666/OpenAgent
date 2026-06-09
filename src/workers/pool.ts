@@ -78,7 +78,12 @@ function parseWorkerMessage(value: unknown): WorkerMessage | null {
     if (typeof record.success !== "boolean") return null;
     if (typeof record.output !== "string") return null;
     const engine = record.engine;
-    if (engine !== "isolated-vm" && engine !== "vm" && engine !== "shell") {
+    if (
+      engine !== "isolated-vm" &&
+      engine !== "vm" &&
+      engine !== "shell" &&
+      engine !== "exec"
+    ) {
       return null;
     }
     const error =

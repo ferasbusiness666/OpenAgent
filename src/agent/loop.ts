@@ -401,42 +401,47 @@ export class AgentLoop extends EventEmitter {
           // display what the agent wants to do.
           this.emit("toolCall", { tool: response.action, params });
 
-          // Approval gate: pause shell commands for user approval in interactive
-          // mode. With no handler registered (headless / Telegram-only) the loop
-          // never pauses and stays fully autonomous. A denial is NOT a failure,
-          // so we feed a note and continue without touching the corrector.
+          // Approval gate: pause RISKY actions for user approval in interactive
+          // mode — a shell command, or code run via a real interpreter (python/
+          // node/bash/powershell; the "js" sandbox is contained and exempt).
+          // Both have full system access. With no handler registered (headless /
+          // Telegram-only) the loop never pauses and stays fully autonomous. A
+          // denial is NOT a failure, so we feed a note and continue without
+          // touching the corrector.
+          const codeLang =
+            response.action === "code"
+              ? typeof params.language === "string"
+                ? params.language
+                : "js"
+              : null;
+          const isRiskyCode = codeLang !== null && codeLang !== "js";
           if (
-            response.action === "shell" &&
             cfg.requireCommandApproval &&
-            this.approvalHandler
+            this.approvalHandler &&
+            (response.action === "shell" || isRiskyCode)
           ) {
-            const command =
-              typeof params.command === "string"
-                ? params.command
-                : stableStringify(params);
+            const summary =
+              response.action === "shell"
+                ? typeof params.command === "string"
+                  ? params.command
+                  : stableStringify(params)
+                : `${codeLang}: ${typeof params.code === "string" ? params.code : stableStringify(params)}`;
             let approved = false;
             try {
-              approved = await this.approvalHandler({
-                tool: "shell",
-                summary: command,
-              });
+              approved = await this.approvalHandler({ tool: response.action, summary });
             } catch {
               approved = false;
             }
             if (!approved) {
               const note =
-                "[shell] DENIED by the user. The command was NOT run. Choose a different " +
+                `[${response.action}] DENIED by the user. It was NOT run. Choose a different ` +
                 'approach, or explain what you need and use action "stuck" if you cannot proceed.';
               this.emit("toolResult", {
-                tool: "shell",
-                result: "Command denied by the user.",
+                tool: response.action,
+                result: "Action denied by the user.",
                 success: false,
               });
-              this.session.add({
-                role: "tool_result",
-                content: note,
-                timestamp: new Date(),
-              });
+              this.session.add({ role: "tool_result", content: note, timestamp: new Date() });
               continue;
             }
           }

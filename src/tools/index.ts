@@ -3,7 +3,7 @@ import type { ShellResult } from "./shell.js";
 import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
-import { CodeTool } from "./code.js";
+import { CodeTool, SUPPORTED_LANGUAGES, type CodeLanguage } from "./code.js";
 import { ResearchTool } from "./research.js";
 import { LongTermMemory, type RecallHit } from "../memory/longterm.js";
 import { getConnector } from "../connectors/index.js";
@@ -334,6 +334,7 @@ function parseResearchParams(
 
 /** Validated parameter shape for the code tool. */
 export interface CodeParams {
+  language: CodeLanguage;
   code?: string;
   tasks?: string[];
   timeoutMs?: number;
@@ -345,7 +346,12 @@ function parseCodeParams(params: Record<string, unknown>): CodeParams | string {
   if (code === undefined && tasks === undefined) {
     return 'code requires a string "code" parameter, or a "tasks" array of JS snippets to run in parallel.';
   }
-  const out: CodeParams = {};
+  const rawLang = asString(params.language);
+  if (rawLang !== null && !(SUPPORTED_LANGUAGES as readonly string[]).includes(rawLang)) {
+    return `code "language" must be one of: ${SUPPORTED_LANGUAGES.join(", ")}.`;
+  }
+  const language = (rawLang ?? "js") as CodeLanguage;
+  const out: CodeParams = { language };
   if (code !== undefined) out.code = code;
   if (tasks !== undefined) out.tasks = tasks;
   const timeoutMs = asNumber(params.timeoutMs);
@@ -533,7 +539,7 @@ export async function executeTool(
       const result =
         parsed.tasks !== undefined && parsed.tasks.length > 0
           ? await registry.code.runMany(parsed.tasks, parsed.timeoutMs)
-          : await registry.code.runJs(parsed.code ?? "", parsed.timeoutMs);
+          : await registry.code.run(parsed.language, parsed.code ?? "", parsed.timeoutMs);
       return { success: true, result };
     }
 

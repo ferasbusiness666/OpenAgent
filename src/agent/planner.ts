@@ -63,8 +63,10 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 5. research — research the web for a query (headless browser, no API key). Returns a digest of top results.
    params: { "query": "string", "maxResults": number (optional, default 5), "fetchPages": boolean (optional — also fetch the top pages' text) }
 
-6. code — run a snippet of JavaScript in a sandboxed, resource-limited worker thread and return its output.
-   params: { "code": "string (JS source)", "timeoutMs": number (optional) }  OR  { "tasks": ["js source", "js source", ...] } to run several in parallel.
+6. code — run a code snippet in a resource-limited worker thread and return its output.
+   params: { "language": "js" | "python" | "node" | "bash" | "powershell" (default "js"), "code": "string (source)", "timeoutMs": number (optional) }
+            OR { "tasks": ["js source", ...] } to run several JS snippets in parallel.
+   "js" runs in an isolated in-process sandbox (safe, no filesystem/network). The other languages run via the local interpreter (if installed) in the workspace, with full system access — those require the user's approval, like shell.
 
 7. memory — durable long-term memory, searchable with keyword (BM25) ranking.
    params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "query": "search text (recall)", "topK": number (optional) }

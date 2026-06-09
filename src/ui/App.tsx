@@ -1301,7 +1301,7 @@ function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
       name: "research",
       detail: "web research via the Tavily API — search + digest top results (needs TAVILY_API_KEY)",
     },
-    { name: "code", detail: "run sandboxed JavaScript in resource-limited worker threads (parallel)" },
+    { name: "code", detail: "run code (js sandbox / python / node / bash / powershell) in resource-limited workers" },
     { name: "memory", detail: "long-term memory — remember / recall with BM25 keyword search" },
   ];
   return (

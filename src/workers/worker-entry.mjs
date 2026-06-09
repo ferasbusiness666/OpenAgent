@@ -11,10 +11,16 @@
  *  - "shell": runs the command via child_process.exec, combining stdout+stderr.
  *  - "js":    evaluates the source in a sandbox. Tries `isolated-vm` first (if
  *             installed) and falls back to Node's built-in `vm` module.
+ *  - "exec":  runs `source` as `language` via a local interpreter (python, node,
+ *             bash, powershell), writing it to a temp file and execFile-ing it.
  */
 
 import { workerData, parentPort } from "node:worker_threads";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
 
 /** Best-effort JSON stringify that never throws. */
 function safeStringify(value) {
@@ -55,6 +61,142 @@ function runShell(job) {
       });
     },
   );
+}
+
+/**
+ * Map a language to its candidate interpreter commands, the temp-file extension
+ * to use, and a builder for the execFile args given the script path. Candidates
+ * are tried in order; the first that isn't ENOENT wins. Returns null for an
+ * unknown language so the caller can post a clear "unsupported" failure.
+ */
+function interpreterFor(language) {
+  const isWin = process.platform === "win32";
+  switch (language) {
+    case "python":
+      return {
+        candidates: isWin ? ["python", "python3"] : ["python3", "python"],
+        ext: ".py",
+        args: (file) => [file],
+      };
+    case "node":
+      return { candidates: ["node"], ext: ".js", args: (file) => [file] };
+    case "bash":
+      return { candidates: ["bash"], ext: ".sh", args: (file) => [file] };
+    case "powershell":
+      return {
+        candidates: isWin ? ["powershell", "pwsh"] : ["pwsh"],
+        ext: ".ps1",
+        args: (file) => [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          file,
+        ],
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Run an "exec" job: write `job.source` to a temp file and run it through the
+ * local interpreter for `job.language`. Tries each candidate command in order,
+ * skipping ones that aren't installed (ENOENT). Always posts exactly one result
+ * and always deletes the temp file. Bounded only by the execFile timeout (+
+ * SIGKILL) and the pool's backstop — there is no memory cap without Docker.
+ */
+function runExec(job) {
+  const language = String(job.language ?? "");
+  const spec = interpreterFor(language);
+  if (!spec) {
+    postResult({
+      type: "result",
+      success: false,
+      output: "",
+      error: `unsupported language: ${language || "(none)"}`,
+      engine: "exec",
+    });
+    return;
+  }
+
+  const cwd = job.cwd ?? process.cwd();
+  const timeout = job.timeoutMs ?? 30000;
+  const file = path.join(
+    os.tmpdir(),
+    `openagent-${crypto.randomBytes(8).toString("hex")}${spec.ext}`,
+  );
+
+  const cleanup = () => {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      /* ignore cleanup errors */
+    }
+  };
+
+  let posted = false;
+  const post = (result) => {
+    if (posted) return;
+    posted = true;
+    cleanup();
+    postResult(result);
+  };
+
+  try {
+    fs.writeFileSync(file, job.source ?? "", "utf8");
+  } catch (err) {
+    post({
+      type: "result",
+      success: false,
+      output: "",
+      error: String((err && err.message) || err),
+      engine: "exec",
+    });
+    return;
+  }
+
+  // Try candidate interpreters in order. ENOENT means "not installed" → try the
+  // next; if every candidate is ENOENT we report a clear not-found message.
+  const tryAt = (index) => {
+    if (index >= spec.candidates.length) {
+      post({
+        type: "result",
+        success: false,
+        output: "",
+        error: `${language} not found — is it installed and on PATH?`,
+        engine: "exec",
+      });
+      return;
+    }
+    const cmd = spec.candidates[index];
+    execFile(
+      cmd,
+      spec.args(file),
+      {
+        cwd,
+        timeout,
+        killSignal: "SIGKILL",
+        windowsHide: true,
+        maxBuffer: 1 << 20,
+      },
+      (error, stdout, stderr) => {
+        if (error && error.code === "ENOENT") {
+          tryAt(index + 1);
+          return;
+        }
+        post({
+          type: "result",
+          success: !error,
+          output: `${stdout ?? ""}${stderr ?? ""}`,
+          error: error ? String(error.message) : undefined,
+          engine: "exec",
+        });
+      },
+    );
+  };
+
+  tryAt(0);
 }
 
 /**
@@ -209,6 +351,10 @@ async function main() {
     }
     if (job.kind === "js") {
       await runJs(job);
+      return;
+    }
+    if (job.kind === "exec") {
+      runExec(job);
       return;
     }
     postResult({
