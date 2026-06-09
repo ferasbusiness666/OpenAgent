@@ -16,6 +16,7 @@ import {
   type ValidationResult,
 } from "../config/validate.js";
 import { getProvider, detectClis } from "../providers/index.js";
+import { isApiProviderName, API_PROVIDER_IDS } from "../providers/catalog.js";
 import {
   listProjects,
   createProject,
@@ -139,13 +140,8 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
         partial.providerMode = value;
         break;
       case "apiProvider":
-        if (
-          value !== "openai" &&
-          value !== "anthropic" &&
-          value !== "google" &&
-          value !== "openrouter"
-        ) {
-          return { error: "apiProvider must be openai, anthropic, google, or openrouter." };
+        if (!isApiProviderName(value)) {
+          return { error: "apiProvider must be one of: " + API_PROVIDER_IDS.join(", ") };
         }
         partial.apiProvider = value;
         break;

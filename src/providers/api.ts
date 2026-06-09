@@ -1,6 +1,8 @@
 import type { Provider } from "./index.js";
+import type { ApiProviderName } from "./catalog.js";
+import { defaultModelFor } from "./catalog.js";
 
-export type ApiProviderName = "openai" | "anthropic" | "google" | "openrouter";
+export type { ApiProviderName } from "./catalog.js";
 
 /** Minimal shapes of the response payloads we read from each provider. */
 interface AnthropicResponse {
@@ -49,6 +51,8 @@ export class APIProvider implements Provider {
         return this.completeGoogle(prompt);
       case "openrouter":
         return this.completeOpenRouter(prompt);
+      case "groq":
+        return this.completeGroq(prompt);
       default: {
         // Exhaustiveness guard — unreachable under the typed union.
         const never: never = this.apiProvider;
@@ -82,7 +86,7 @@ export class APIProvider implements Provider {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: this.model.trim() || "claude-sonnet-4-20250514",
+        model: this.model.trim() || defaultModelFor("anthropic"),
         max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -141,7 +145,15 @@ export class APIProvider implements Provider {
   private async completeOpenAI(prompt: string): Promise<string> {
     return this.completeOpenAICompatible(prompt, {
       url: "https://api.openai.com/v1/chat/completions",
-      defaultModel: "gpt-4o",
+      defaultModel: defaultModelFor("openai"),
+    });
+  }
+
+  /** Groq's OpenAI-compatible chat completions endpoint (no extra headers). */
+  private async completeGroq(prompt: string): Promise<string> {
+    return this.completeOpenAICompatible(prompt, {
+      url: "https://api.groq.com/openai/v1/chat/completions",
+      defaultModel: defaultModelFor("groq"),
     });
   }
 
@@ -152,21 +164,25 @@ export class APIProvider implements Provider {
         "HTTP-Referer": "https://github.com/ferasbusiness666/OpenAgent",
         "X-Title": "OpenAgent",
       },
-      defaultModel: "openai/gpt-4o",
+      defaultModel: defaultModelFor("openrouter"),
     });
   }
 
   private async completeGoogle(prompt: string): Promise<string> {
-    const model = this.model.trim() || "gemini-2.0-flash";
+    const model = this.model.trim() || defaultModelFor("google");
+    // AI Studio's documented auth puts the key in the x-goog-api-key header
+    // rather than the URL query string.
     const endpoint =
       "https://generativelanguage.googleapis.com/v1beta/models/" +
       encodeURIComponent(model) +
-      ":generateContent?key=" +
-      encodeURIComponent(this.apiKey);
+      ":generateContent";
 
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "x-goog-api-key": this.apiKey,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
       }),

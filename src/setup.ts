@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { spawnSync } from "node:child_process";
 import { saveConfig, type Config } from "./config/index.js";
+import { API_PROVIDERS, defaultModelFor, type ApiProviderName } from "./providers/catalog.js";
 
 /**
  * CLIs we know how to drive. Keep in sync with src/providers/detector.ts and
@@ -8,7 +9,6 @@ import { saveConfig, type Config } from "./config/index.js";
  * setup wizard is fully self-contained and can run before the UI boots.
  */
 const KNOWN_CLIS = ["gemini", "claude", "codex", "aider", "goose", "ollama"] as const;
-const API_PROVIDERS = ["openai", "anthropic", "google", "openrouter"] as const;
 
 /** Check whether a command exists on PATH using `where` (win) / `which` (unix). */
 function commandExists(cmd: string): boolean {
@@ -48,22 +48,30 @@ export async function runSetup(): Promise<Config> {
     console.log("──────────────────────────────────────────────");
     console.log("");
 
-    // 1. Detect installed CLIs.
+    // 1. Detect installed CLIs (a secondary, optional path now).
     console.log("Scanning for installed AI CLIs...");
     const detected = detectClis();
 
-    // 2. Build the choice list: detected CLIs + an API key option.
-    const options: string[] = [...detected];
-    const apiOptionIndex = options.length; // index of the "Enter API key" choice
-    options.push("Enter API key instead");
+    // 2. Build the choice list, API-key providers FIRST (the recommended way),
+    //    then any detected local CLIs. The combined `options` array is a union
+    //    of provider metadata objects and CLI-name strings; the first
+    //    `apiCount` entries are API providers, the rest are CLIs.
+    const apiCount = API_PROVIDERS.length;
+    const options: Array<(typeof API_PROVIDERS)[number] | string> = [
+      ...API_PROVIDERS,
+      ...detected,
+    ];
 
     console.log("");
     console.log("How should Open Agent talk to a model?");
-    if (detected.length === 0) {
-      console.log("  (no supported CLIs found on PATH)");
-    }
+    console.log("Recommended: use a hosted API key — no local AI CLI required.");
+    console.log("(Local CLIs are optional and only listed if installed.)");
+    console.log("");
     options.forEach((opt, i) => {
-      const label = i === apiOptionIndex ? opt : `Use detected CLI: ${opt}`;
+      const label =
+        i < apiCount
+          ? `Use ${(opt as (typeof API_PROVIDERS)[number]).label} API key  (key: ${(opt as (typeof API_PROVIDERS)[number]).keyHint})`
+          : `Use local CLI: ${opt as string}`;
       console.log(`  ${i + 1}) ${label}`);
     });
     console.log("");
@@ -81,20 +89,17 @@ export async function runSetup(): Promise<Config> {
 
     const partial: Partial<Config> = {};
 
-    if (choiceIndex === apiOptionIndex) {
-      // 4. API key path.
+    if (choiceIndex < apiCount) {
+      // API-key path (the primary flow). `chosen` is the catalog metadata for
+      // the picked provider; its id is an ApiProviderName (incl. "groq").
+      const chosen = API_PROVIDERS[choiceIndex];
+      const providerId: ApiProviderName = chosen.id;
       partial.providerMode = "api";
+      partial.apiProvider = providerId;
 
-      let provider = "";
-      while (!API_PROVIDERS.includes(provider as (typeof API_PROVIDERS)[number])) {
-        provider = (
-          await ask(`API provider (${API_PROVIDERS.join(" / ")}): `)
-        ).toLowerCase();
-        if (!API_PROVIDERS.includes(provider as (typeof API_PROVIDERS)[number])) {
-          console.log(`  Please enter one of: ${API_PROVIDERS.join(", ")}`);
-        }
-      }
-      partial.apiProvider = provider as Config["apiProvider"];
+      console.log("");
+      console.log(`Selected ${chosen.label}.`);
+      console.log(`Get a key at: ${chosen.keyHint}`);
 
       let key = "";
       while (key.length === 0) {
@@ -102,10 +107,17 @@ export async function runSetup(): Promise<Config> {
         if (key.length === 0) console.log("  API key cannot be empty.");
       }
       partial.apiKey = key;
+
+      // Seed the default model so the right one is used out of the box. The
+      // user can change it later via /model or /settings.
+      const model = defaultModelFor(providerId);
+      partial.activeModel = model;
+      console.log(`Default model: ${model} (change later with /model or /settings).`);
     } else {
-      // 3. CLI path.
+      // Local CLI path (unchanged behavior).
+      const cli = options[choiceIndex] as string;
       partial.providerMode = "cli";
-      partial.activeCliName = options[choiceIndex];
+      partial.activeCliName = cli;
     }
 
     // That is all the first-run wizard asks. The workspace is the directory the

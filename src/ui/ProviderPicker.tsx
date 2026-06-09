@@ -2,6 +2,12 @@ import { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { Config } from "../config/index.js";
 import type { ValidationResult } from "../config/validate.js";
+import {
+  API_PROVIDERS,
+  defaultModelFor,
+  providerMeta,
+  type ApiProviderName,
+} from "../providers/catalog.js";
 
 interface ProviderPickerProps {
   config: Config;
@@ -14,7 +20,6 @@ interface ProviderPickerProps {
 type Step = "mode" | "cli" | "apiProvider" | "apiKey";
 
 const MODES = ["cli", "api"] as const;
-const API_PROVIDERS = ["openai", "anthropic", "google", "openrouter"] as const;
 
 /** Color the result line by its leading status glyph. */
 function statusColor(message: string): string {
@@ -33,7 +38,7 @@ function statusColor(message: string): string {
 export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: ProviderPickerProps) {
   const [step, setStep] = useState<Step>("mode");
   const [selected, setSelected] = useState(0);
-  const [apiProvider, setApiProvider] = useState(config.apiProvider);
+  const [apiProvider, setApiProvider] = useState<ApiProviderName>(config.apiProvider);
   const [keyBuffer, setKeyBuffer] = useState(config.apiKey);
   const [pending, setPending] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
@@ -105,7 +110,7 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       if (key.upArrow) return move(-1, API_PROVIDERS.length);
       if (key.downArrow) return move(1, API_PROVIDERS.length);
       if (key.return) {
-        setApiProvider(API_PROVIDERS[selected]);
+        setApiProvider(API_PROVIDERS[selected].id);
         setStep("apiKey");
       }
       return;
@@ -117,7 +122,12 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       return;
     }
     if (key.return) {
-      submit({ providerMode: "api", apiProvider, apiKey: keyBuffer.trim() });
+      submit({
+        providerMode: "api",
+        apiProvider,
+        apiKey: keyBuffer.trim(),
+        activeModel: defaultModelFor(apiProvider),
+      });
       return;
     }
     if (key.backspace || key.delete) {
@@ -167,9 +177,9 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
         <Box flexDirection="column" marginTop={1}>
           <Text color="gray">Choose an API provider:</Text>
           {API_PROVIDERS.map((provider, index) => (
-            <Text key={provider} color={index === selected ? "greenBright" : "white"} bold={index === selected}>
+            <Text key={provider.id} color={index === selected ? "greenBright" : "white"} bold={index === selected}>
               {index === selected ? "› " : "  "}
-              {provider}
+              {provider.label}
             </Text>
           ))}
         </Box>
@@ -178,6 +188,9 @@ export function ProviderPicker({ config, detectedClis, onSubmit, onClose }: Prov
       {step === "apiKey" ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color="gray">API provider: {apiProvider}</Text>
+          {providerMeta(apiProvider) ? (
+            <Text color="gray">Get a key: {providerMeta(apiProvider)?.keyHint}</Text>
+          ) : null}
           <Box>
             <Text color="white">API key: </Text>
             <Text color="yellow">{keyBuffer.length > 0 ? "•".repeat(Math.min(keyBuffer.length, 24)) : ""}</Text>

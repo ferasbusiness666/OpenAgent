@@ -18,7 +18,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
 - **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json` and are fired by an in-process poller when the agent is idle (`/schedule`).
 - **GitHub connector** — read **and write** GitHub access via the `github` tool (list repos, read files, list issues, create/comment/close issues, list/get/create pull requests), authenticated with the `GITHUB_TOKEN` environment variable.
-- **Provider-agnostic** — drive it with a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) or a hosted API (OpenAI, Anthropic, Google, OpenRouter). The CLI bridge is hardened against hangs, crashes, and noisy output.
+- **API-key first** — the primary way to run Open Agent is a hosted API key, no local tooling required: **OpenAI**, **Anthropic (Claude)**, **Google AI Studio (Gemini)**, **Groq**, and **OpenRouter**. The first-run wizard lists these providers, you paste a key, and a sensible default model is selected for you. Driving a local AI CLI (`gemini`, `claude`, `codex`, `aider`, `goose`, `ollama`) is still supported as an optional alternative; that bridge is hardened against hangs, crashes, and noisy output.
 - **Projects & saved sessions** — each directory you launch in is remembered as a project; every message is saved to a per-project session file on disk, and you can reopen a recent one with `/sessions`.
 - **Hot provider/model switching** — change provider or model mid-conversation (`/provider`, `/model`) without losing any history.
 - **Slash commands** — `/settings`, `/tools`, `/model`, `/provider`, `/history`, `/sessions`, `/workers`, `/memory`, `/schedule`, `/clear`, `/help` run inline from the chat.
@@ -61,7 +61,7 @@ When you launch in a directory, Open Agent walks through this sequence before th
 1. **Trust prompt** — `Do you trust the files in <cwd>? (y/N)`. Answering no exits. This is the gate that lets the agent operate in the directory.
 2. **Known-project detection** — if a project is already registered for this directory, it asks `Welcome back to <name>. Continue? (Y/n)`. Yes loads that project and its last saved session straight into chat.
 3. **New project setup** — otherwise it registers a new project for the current directory, asking for a project name (defaulting to the directory name).
-4. **First-run provider wizard** — runs **only if no provider is configured yet**. It detects installed AI CLIs and asks only how you want to connect: pick a detected CLI or enter an API key. Nothing else (no Telegram, no workspace path) is asked here — those are configured later from `/settings`.
+4. **First-run provider wizard** — runs **only if no provider is configured yet**. It lists the hosted API providers first (OpenAI, Anthropic, Google AI Studio, Groq, OpenRouter) — pick one, paste its key, and a default model is chosen for you. Any installed AI CLIs are offered after that as an optional local alternative. Nothing else (no Telegram, no workspace path) is asked here — those are configured later from `/settings`.
 5. **Chat UI** — you land in the chat. Type a task, or type `/` to see the command menu.
 
 ### Slash commands
@@ -103,8 +103,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `workspacePath` | Optional override for the agent's working folder. Empty (`""`, the default) means use the directory `openagent` was launched in. |
 | `providerMode` | `"cli"` or `"api"`. |
 | `activeCliName` | Detected CLI to drive (cli mode). |
-| `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "openrouter"` (api mode). OpenRouter uses the OpenAI-compatible API at `https://openrouter.ai/api/v1`. |
-| `activeModel` | Model name/id to use (e.g. `gpt-4o`, `gemini-2.0-flash`, `llama3`, or an OpenRouter id like `openai/gpt-4o`); blank = provider default. |
+| `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "groq" \| "openrouter"` (api mode). `google` is Google AI Studio (Gemini, `x-goog-api-key` header). `groq` and `openrouter` are OpenAI-compatible (`https://api.groq.com/openai/v1`, `https://openrouter.ai/api/v1`). |
+| `activeModel` | Model name/id to use (e.g. `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.0-flash`, `llama-3.3-70b-versatile`, or an OpenRouter id like `openai/gpt-4o`); blank = the provider's default. |
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |
 
@@ -192,7 +192,7 @@ src/
   workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
   scheduler/ file-based scheduler + types
   connectors/ github (read + PR/issue write), registry, types
-  providers/ detector, cli, api, factory
+  providers/ detector, cli, api, factory, catalog (API provider metadata)
   memory/    session (in-memory + disk persistence),
              session-store (session file paths/serialization),
              session-manager (resumable AgentState), longterm (BM25 memory),

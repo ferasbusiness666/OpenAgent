@@ -15,10 +15,10 @@ export { CONFIG_PATH } from "../paths.js";
  */
 export const ConfigSchema = z.object({
   workspacePath: z.string().default(""),
-  providerMode: z.enum(["cli", "api"]).default("cli"),
+  providerMode: z.enum(["cli", "api"]).default("api"),
   activeCliName: z.string().default(""),
   apiKey: z.string().default(""),
-  apiProvider: z.enum(["openai", "anthropic", "google", "openrouter"]).default("anthropic"),
+  apiProvider: z.enum(["openai", "anthropic", "google", "groq", "openrouter"]).default("anthropic"),
   activeModel: z.string().default(""),
   telegramToken: z.string().default(""),
   telegramChatId: z.string().default(""),

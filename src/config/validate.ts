@@ -66,11 +66,22 @@ export async function validateApiKey(
           "X-Title": "OpenAgent",
         },
       });
-    } else {
+    } else if (provider === "groq") {
+      // Groq is OpenAI-compatible; listing models is a cheap auth check.
+      response = await fetchWithTimeout("https://api.groq.com/openai/v1/models", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    } else if (provider === "google") {
+      // Header auth matches the request wiring in api.ts (x-goog-api-key).
       response = await fetchWithTimeout(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
-        { method: "GET" },
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        { method: "GET", headers: { "x-goog-api-key": key } },
       );
+    } else {
+      // Unreachable for the typed union, but keeps the chain total without a
+      // dangling else that TypeScript would treat as `never`.
+      return { ok: false, message: `Unknown provider: ${provider}` };
     }
 
     if (response.ok) {
