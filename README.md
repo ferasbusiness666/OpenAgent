@@ -19,6 +19,9 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
 - **Self-critique** — before it accepts `done`, the agent reviews the work against the original goal; if it isn't genuinely complete it feeds the gap back and keeps going (bounded, so it never loops forever). Toggle `enableReflection` in `/settings`.
+- **Native function-calling** — with an API provider the agent acts via real tool/function calls (Anthropic tools, OpenAI/Groq functions, Gemini functionDeclarations), so its actions are structured rather than parsed out of text — far fewer malformed-action retries. CLI providers fall back to the JSON action protocol.
+- **Local preview** — the `serve` tool hosts a workspace directory over HTTP on `localhost` and returns the URL, for previewing what the agent built.
+- **Eval harness** — `npx tsx scripts/eval.ts` runs canned tasks end-to-end and scores them (`--selftest` checks the harness offline); useful for catching quality regressions.
 - **Background runs** — launch a task that runs to completion in a **detached process** which outlives the terminal (`/background <task>` or `openagent --background "…"`). It streams its lifecycle to `~/.openagent/runs/<id>.log`, persists its state, and notifies on completion (Telegram + a desktop ping). List runs with `/runs` and follow one live with `/attach <id>`.
 - **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json`, fired by an in-process poller (`/schedule`); a due task launches as a background run so it never blocks the foreground agent.
 - **GitHub connector** — read **and write** GitHub access via the `github` tool (list repos, read files, list issues, create/comment/close issues, list/get/create pull requests), authenticated with the `GITHUB_TOKEN` environment variable.
@@ -165,7 +168,7 @@ In a non-TTY environment the UI falls back to plain console output.
 
 On startup the agent merges two memory files into its system prompt: `~/.openagent/AGENT.md` (global memory — preferences and general info about you) and `<cwd>/AGENT.md` (project-specific memory). Either is created from a template if it is missing.
 
-Each turn the agent is sent a **stable, cacheable system prefix** (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the response-format rules) plus the running history as a **role-tagged message array**. Volatile content — the current time and the recited plan — is appended to the most recent user message, never to the system prefix. Keeping that prefix byte-for-byte stable lets each backend reuse its **prompt cache** (Anthropic `cache_control`, OpenAI/Groq automatic prefix caching, Gemini `systemInstruction`), which cuts latency and cost on long runs; reciting the plan in the recent turn keeps the goal in attention. The agent replies with a single JSON object:
+Each turn the agent is sent a **stable, cacheable system prefix** (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the response-format rules) plus the running history as a **role-tagged message array**. Volatile content — the current time and the recited plan — is appended to the most recent user message, never to the system prefix. Keeping that prefix byte-for-byte stable lets each backend reuse its **prompt cache** (Anthropic `cache_control`, OpenAI/Groq automatic prefix caching, Gemini `systemInstruction`), which cuts latency and cost on long runs; reciting the plan in the recent turn keeps the goal in attention. The action set (shell/filesystem/browser/github/research/code/memory/serve plus done/stuck/update_plan) is offered to API providers as **native tools**, so the agent returns a structured tool call; CLI/text providers instead reply with a single JSON object:
 
 ```json
 {
@@ -211,7 +214,9 @@ src/
              run-store + runner (detached background runs),
              corrector (self-healing exponential back-off)
   tools/     shell (cross-platform), filesystem, browser, research,
-             code (sandboxed JS), registry
+             code (multi-language), serve (local preview), registry
+  agent/     ... + tool-schemas (native function-calling definitions)
+  eval/      eval-harness tasks (scripts/eval.ts runs them)
   workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
   scheduler/ file-based scheduler + types
   connectors/ github (read + PR/issue write), registry, types

@@ -4,6 +4,7 @@ import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
 import { CodeTool, SUPPORTED_LANGUAGES, type CodeLanguage } from "./code.js";
+import { ServeTool } from "./serve.js";
 import { ResearchTool } from "./research.js";
 import { LongTermMemory, type RecallHit } from "../memory/longterm.js";
 import { getConnector } from "../connectors/index.js";
@@ -15,6 +16,8 @@ export type { FilesystemOperation } from "./filesystem.js";
 export { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
 // Re-exported so the entry point can tear the worker pool down on exit.
 export { closeWorkerPool } from "../workers/pool.js";
+// Re-exported so the entry point can shut down any local preview servers.
+export { closeAllServers } from "./serve.js";
 
 /** Validated parameter shape for the shell tool. */
 export interface ShellParams {
@@ -71,6 +74,7 @@ class ToolRegistry {
   readonly filesystem = new FilesystemTool();
   readonly browser = new BrowserTool();
   readonly code = new CodeTool();
+  readonly serve = new ServeTool();
   readonly research = new ResearchTool();
   readonly memory = new LongTermMemory();
 }
@@ -111,6 +115,7 @@ const TOOL_NAMES = [
   "research",
   "code",
   "memory",
+  "serve",
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -395,6 +400,21 @@ function parseCodeParams(params: Record<string, unknown>): CodeParams | string {
   return out;
 }
 
+/** Validated parameter shape for the serve tool. */
+export interface ServeParams {
+  dir?: string;
+  port?: number;
+}
+
+function parseServeParams(params: Record<string, unknown>): ServeParams | string {
+  const out: ServeParams = {};
+  const dir = asString(params.dir);
+  if (dir !== null && dir.trim().length > 0) out.dir = dir;
+  const port = asNumber(params.port);
+  if (port !== null) out.port = Math.max(1, Math.min(65535, Math.round(port)));
+  return out;
+}
+
 /** Validated parameter shape for the memory tool. */
 export interface MemoryParams {
   operation: "remember" | "recall";
@@ -587,6 +607,15 @@ export async function executeTool(
         parsed.tasks !== undefined && parsed.tasks.length > 0
           ? await registry.code.runMany(parsed.tasks, parsed.timeoutMs)
           : await registry.code.run(parsed.language, parsed.code ?? "", parsed.timeoutMs);
+      return { success: true, result };
+    }
+
+    if (name === "serve") {
+      const parsed = parseServeParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const result = await registry.serve.serve(parsed.dir, parsed.port);
       return { success: true, result };
     }
 

@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { Provider } from "./index.js";
-import type { GenerateRequest, ChatMessage } from "./messages.js";
+import type { GenerateRequest, GenerateResult, ChatMessage } from "./messages.js";
 import { extractJsonObject } from "../util/json.js";
 
 /** Hard ceiling on a single CLI invocation, in milliseconds. */
@@ -151,7 +151,17 @@ export class CLIProvider implements Provider {
     return parts.join("\n\n");
   }
 
-  generate(request: GenerateRequest): Promise<string> {
+  /**
+   * CLI providers are text-only (no native function-calling): run the CLI and
+   * return its text. The loop's text path parses the JSON action protocol from
+   * it, exactly as before — so `toolCalls` is always empty here.
+   */
+  async generate(request: GenerateRequest): Promise<GenerateResult> {
+    const text = await this.runRaw(request);
+    return { text, toolCalls: [] };
+  }
+
+  private runRaw(request: GenerateRequest): Promise<string> {
     const prompt = this.flatten(request);
     const cli = this.cliName;
     const args = buildArgs(cli, prompt, this.model);

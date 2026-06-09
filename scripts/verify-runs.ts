@@ -10,7 +10,7 @@ import path from "node:path";
 import fs from "fs-extra";
 import { RunStore } from "../src/agent/run-store.js";
 import { executeRun, launchBackgroundRun } from "../src/agent/runner.js";
-import type { Provider, GenerateRequest } from "../src/providers/index.js";
+import type { Provider, GenerateRequest, GenerateResult } from "../src/providers/index.js";
 
 const checks: Array<[string, boolean]> = [];
 const ok = (l: string, c: boolean): void => {
@@ -21,12 +21,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 class ScriptedProvider implements Provider {
   readonly name = "scripted-run";
   readonly supportsVision = false;
-  async generate(req: GenerateRequest): Promise<string> {
+  async generate(req: GenerateRequest): Promise<GenerateResult> {
     const text = req.system + "\n" + req.messages.map((m) => m.content).join("\n");
     if (text.includes("planning module")) {
-      return JSON.stringify([{ title: "do it", description: "the work" }]);
+      return { text: JSON.stringify([{ title: "do it", description: "the work" }]), toolCalls: [] };
     }
-    return JSON.stringify({ thought: "all done", action: "done", params: {}, message: "finished run" });
+    return { text: JSON.stringify({ thought: "all done", action: "done", params: {}, message: "finished run" }), toolCalls: [] };
   }
 }
 

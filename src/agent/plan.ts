@@ -119,10 +119,12 @@ export class Planner {
     const p = provider ?? this.provider;
     let raw: string;
     try {
-      raw = await p.generate({
+      // No tools here — planning wants a plain-text JSON array back.
+      const result = await p.generate({
         system: "You are the planning module of Open Agent.",
         messages: [{ role: "user", content: buildPlanningPrompt(goal) }],
       });
+      raw = result.text;
     } catch {
       return fallback();
     }

@@ -36,6 +36,7 @@ import {
   closeBrowser,
   closeResearch,
   closeWorkerPool,
+  closeAllServers,
   isBrowserAvailable,
   BROWSER_UNAVAILABLE_MESSAGE,
 } from "./tools/index.js";
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
     await closeBrowser();
     await closeResearch();
     await closeWorkerPool();
+    await closeAllServers();
   };
   process.on("SIGINT", () => {
     void cleanup().finally(() => process.exit(0));

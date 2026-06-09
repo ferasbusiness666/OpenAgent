@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import fs from "fs-extra";
-import type { Provider, ImageData } from "../providers/index.js";
+import type { Provider, ImageData, GenerateResult } from "../providers/index.js";
 import { executeTool, type ToolResult } from "../tools/index.js";
 import { SessionMemory } from "../memory/session.js";
 import { AgentMemory } from "../memory/agent-md.js";
@@ -36,6 +36,7 @@ const TOOL_ACTIONS = [
   "research",
   "code",
   "memory",
+  "serve",
 ] as const;
 type ToolAction = (typeof TOOL_ACTIONS)[number];
 
@@ -182,8 +183,8 @@ export class AgentLoop extends EventEmitter {
         goal: this.goal,
         history: this.session.getHistory(),
       });
-      const raw = await this.provider.generate(request);
-      return parseReflection(raw);
+      const result = await this.provider.generate(request);
+      return parseReflection(result.text);
     } catch {
       return null;
     }
@@ -350,29 +351,29 @@ export class AgentLoop extends EventEmitter {
         // they never accumulate across turns.
         this.pendingImages = [];
 
-        // ---- Ask the provider (stable system prefix → prompt-cache hits) -----
-        let raw: string;
+        // ---- Ask the provider (native tools → a structured action) ----------
+        let result: GenerateResult;
         try {
-          raw = await this.provider.generate(request);
+          result = await this.provider.generate(request);
         } catch (err) {
           this.emit("error", `Provider call failed: ${errMessage(err)}`);
           return;
         }
 
-        // ---- Parse the JSON response -----------------------------------------
-        const parsed = parseAgentResponse(raw);
+        // ---- Resolve the action: native tool call, else parsed JSON text -----
+        const parsed = responseFromResult(result);
         if ("error" in parsed) {
           const outcome = corrector.recordFailure("parse");
           const note =
-            `Your previous response could not be parsed as the required JSON object ` +
-            `(${parsed.error}). You MUST reply with a single valid JSON object matching ` +
-            `the format. Do not include any other text.`;
+            `Your previous turn did not produce a valid action (${parsed.error}). ` +
+            `Call exactly one of the available tools to take the next step (or, if your ` +
+            `model has no tools, reply with the single JSON action object).`;
           this.session.add({ role: "tool_result", content: note, timestamp: new Date() });
           if (outcome.giveUp) {
             this.emit(
               "error",
-              `Provider did not return valid JSON after ${outcome.attempt} attempts. ` +
-                `Last raw output: ${truncate(raw, 500)}`,
+              `Provider did not return a usable action after ${outcome.attempt} attempts. ` +
+                `Last text: ${truncate(result.text, 500)}`,
             );
             return;
           }
@@ -399,8 +400,26 @@ export class AgentLoop extends EventEmitter {
         }
 
         // ---- Plan progress update --------------------------------------------
+        // Text/CLI mode carries progress in a JSON field; native tool-calling
+        // reports it via a dedicated `update_plan` tool call.
         if (response.progress) {
           this.applyProgress(response.progress);
+        }
+        if (response.action === "update_plan") {
+          const p = response.params;
+          const phase = typeof p.phase === "number" ? p.phase : Number(p.phase);
+          const status = p.status;
+          if (
+            Number.isFinite(phase) &&
+            (status === "in_progress" || status === "completed" || status === "failed")
+          ) {
+            this.applyProgress({
+              phase,
+              status,
+              finding: typeof p.finding === "string" ? p.finding : undefined,
+            });
+          }
+          continue;
         }
 
         // ---- Terminal actions -------------------------------------------------
@@ -629,6 +648,37 @@ export function parseAgentResponse(raw: string): ParseSuccess | ParseFailure {
     return { error: validated.error.issues.map((i) => i.message).join("; ") };
   }
   return { value: validated.data };
+}
+
+/**
+ * Adapt a provider {@link GenerateResult} into an AgentResponse. Prefer a native
+ * tool call (API providers with function-calling); otherwise fall back to
+ * parsing the JSON action object from text (CLI / providers without tools).
+ */
+export function responseFromResult(result: GenerateResult): ParseSuccess | ParseFailure {
+  const call = result.toolCalls[0];
+  if (call) {
+    const args = call.arguments ?? {};
+    const message = typeof args.message === "string" ? args.message : undefined;
+    const validated = AgentResponseSchema.safeParse({
+      thought: result.text ?? "",
+      action: call.name,
+      params: args,
+      ...(message !== undefined ? { message } : {}),
+    });
+    if (!validated.success) {
+      return {
+        error: `unknown or invalid tool "${call.name}": ${validated.error.issues
+          .map((i) => i.message)
+          .join("; ")}`,
+      };
+    }
+    return { value: validated.data };
+  }
+  if (result.text.trim().length > 0) {
+    return parseAgentResponse(result.text);
+  }
+  return { error: "the model returned neither a tool call nor any text" };
 }
 
 /** Deterministic stringify (sorted keys) so identical params share a signature. */

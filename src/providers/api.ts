@@ -1,7 +1,12 @@
 import type { Provider } from "./index.js";
 import type { ApiProviderName } from "./catalog.js";
 import { defaultModelFor } from "./catalog.js";
-import type { GenerateRequest, ChatMessage } from "./messages.js";
+import type {
+  GenerateRequest,
+  GenerateResult,
+  ChatMessage,
+  ToolCall,
+} from "./messages.js";
 
 export type { ApiProviderName } from "./catalog.js";
 
@@ -39,18 +44,46 @@ interface GeminiInlineDataPart {
 }
 type GeminiPart = GeminiTextPart | GeminiInlineDataPart;
 
-/** Minimal shapes of the response payloads we read from each provider. */
+/**
+ * Minimal shapes of the response payloads we read from each provider. When the
+ * request offered native tools, the response may carry tool-call blocks/parts
+ * alongside (or instead of) text; these shapes describe just the fields we read.
+ */
+interface AnthropicResponseBlock {
+  type?: string;
+  /** Present on `text` blocks. */
+  text?: string;
+  /** Present on `tool_use` blocks — the tool's declared name. */
+  name?: string;
+  /** Present on `tool_use` blocks — the parsed argument object. */
+  input?: Record<string, unknown>;
+}
 interface AnthropicResponse {
-  content?: Array<{ type?: string; text?: string }>;
+  content?: AnthropicResponseBlock[];
 }
 
+interface OpenAIToolCall {
+  function?: { name?: string; arguments?: string };
+}
+interface OpenAIResponseMessage {
+  content?: string;
+  tool_calls?: OpenAIToolCall[];
+}
 interface OpenAIResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: OpenAIResponseMessage }>;
 }
 
+interface GoogleFunctionCall {
+  name?: string;
+  args?: Record<string, unknown>;
+}
+interface GooglePart {
+  text?: string;
+  functionCall?: GoogleFunctionCall;
+}
 interface GoogleResponse {
   candidates?: Array<{
-    content?: { parts?: Array<{ text?: string }> };
+    content?: { parts?: GooglePart[] };
   }>;
 }
 
@@ -84,7 +117,7 @@ export class APIProvider implements Provider {
       : `api:${this.apiProvider}`;
   }
 
-  async generate(request: GenerateRequest): Promise<string> {
+  async generate(request: GenerateRequest): Promise<GenerateResult> {
     switch (this.apiProvider) {
       case "anthropic":
         return this.completeAnthropic(request);
@@ -193,6 +226,23 @@ export class APIProvider implements Provider {
     ];
   }
 
+  /**
+   * Parses a tool-call argument JSON STRING (OpenAI-compatible providers send
+   * `tool_calls[].function.arguments` as a string) into an argument object,
+   * yielding `{}` on malformed/empty input or a non-object top-level value.
+   */
+  private safeParseJson(s: string): Record<string, unknown> {
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
   private async readJson(response: Response): Promise<unknown> {
     const text = await response.text();
     if (!response.ok) {
@@ -209,7 +259,40 @@ export class APIProvider implements Provider {
     }
   }
 
-  private async completeAnthropic(request: GenerateRequest): Promise<string> {
+  private async completeAnthropic(request: GenerateRequest): Promise<GenerateResult> {
+    // When the loop offers native tools for this turn, advertise them and let
+    // Anthropic choose (`tool_choice: auto`). History stays plain text/images;
+    // only this turn's request body and response parsing are tool-aware.
+    const hasTools = !!request.tools && request.tools.length > 0;
+    const body: Record<string, unknown> = {
+      model: this.model.trim() || defaultModelFor("anthropic"),
+      max_tokens: 4096,
+      // System sent as a content-block array with an ephemeral cache breakpoint
+      // so the stable prefix is cached and reused on subsequent turns.
+      system: [
+        {
+          type: "text",
+          text: request.system,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      // Merge consecutive same-role messages — Anthropic rejects non-alternating
+      // roles. Roles are already "user"/"assistant" from the request. Images,
+      // if present, are encoded as native image blocks alongside the text.
+      messages: this.mergeAlternating(request.messages).map((m) => ({
+        role: m.role,
+        content: this.anthropicContent(m),
+      })),
+    };
+    if (hasTools && request.tools) {
+      body.tools = request.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+      }));
+      body.tool_choice = { type: "auto" };
+    }
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -219,39 +302,31 @@ export class APIProvider implements Provider {
         "anthropic-beta": "prompt-caching-2024-07-31",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        model: this.model.trim() || defaultModelFor("anthropic"),
-        max_tokens: 4096,
-        // System sent as a content-block array with an ephemeral cache breakpoint
-        // so the stable prefix is cached and reused on subsequent turns.
-        system: [
-          {
-            type: "text",
-            text: request.system,
-            cache_control: { type: "ephemeral" },
-          },
-        ],
-        // Merge consecutive same-role messages — Anthropic rejects non-alternating
-        // roles. Roles are already "user"/"assistant" from the request. Images,
-        // if present, are encoded as native image blocks alongside the text.
-        messages: this.mergeAlternating(request.messages).map((m) => ({
-          role: m.role,
-          content: this.anthropicContent(m),
-        })),
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = (await this.readJson(response)) as AnthropicResponse;
-    const block = data.content?.find(
-      (item) => typeof item.text === "string"
-    );
-    const text = block?.text;
-    if (typeof text !== "string") {
+    const blocks = data.content ?? [];
+    // Concatenate all `text` blocks; map each `tool_use` block to a ToolCall.
+    const text = blocks
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("");
+    const toolCalls: ToolCall[] = blocks
+      .filter((b) => b.type === "tool_use" && typeof b.name === "string")
+      .map((b) => ({
+        name: b.name as string,
+        arguments: (b.input ?? {}) as Record<string, unknown>,
+      }));
+
+    // A turn must yield text and/or at least one tool call; empty content is a
+    // malformed response (matches the prior "missing content text" guard).
+    if (text.length === 0 && toolCalls.length === 0) {
       throw new Error(
         `Anthropic response missing content text: ${JSON.stringify(data)}`
       );
     }
-    return text;
+    return { text, toolCalls };
   }
 
   /**
@@ -270,8 +345,35 @@ export class APIProvider implements Provider {
       extraHeaders?: Record<string, string>;
       defaultModel: string;
     }
-  ): Promise<string> {
+  ): Promise<GenerateResult> {
     const { url, extraHeaders = {}, defaultModel } = options;
+    // When tools are offered, advertise them as `function` tools for this turn
+    // and let the model choose (`tool_choice: auto`). History is unchanged.
+    const hasTools = !!request.tools && request.tools.length > 0;
+    const body: Record<string, unknown> = {
+      model: this.model.trim() || defaultModel,
+      messages: [
+        { role: "system", content: request.system },
+        // Per message: plain string content, or a text+image_url part array
+        // when the message carries images.
+        ...request.messages.map((m) => ({
+          role: m.role,
+          content: this.openAIContent(m),
+        })),
+      ],
+    };
+    if (hasTools && request.tools) {
+      body.tools = request.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      }));
+      body.tool_choice = "auto";
+    }
+
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -279,31 +381,28 @@ export class APIProvider implements Provider {
         "content-type": "application/json",
         ...extraHeaders,
       },
-      body: JSON.stringify({
-        model: this.model.trim() || defaultModel,
-        messages: [
-          { role: "system", content: request.system },
-          // Per message: plain string content, or a text+image_url part array
-          // when the message carries images.
-          ...request.messages.map((m) => ({
-            role: m.role,
-            content: this.openAIContent(m),
-          })),
-        ],
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = (await this.readJson(response)) as OpenAIResponse;
-    const text = data.choices?.[0]?.message?.content;
-    if (typeof text !== "string") {
+    const message = data.choices?.[0]?.message;
+    if (!message) {
       throw new Error(
-        `${url} response missing choices[0].message.content: ${JSON.stringify(data)}`
+        `${url} response missing choices[0].message: ${JSON.stringify(data)}`
       );
     }
-    return text;
+    const text = message.content ?? "";
+    // arguments arrives as a JSON STRING; safeParseJson yields {} on bad input.
+    const toolCalls: ToolCall[] = (message.tool_calls ?? [])
+      .filter((tc) => typeof tc.function?.name === "string")
+      .map((tc) => ({
+        name: tc.function?.name as string,
+        arguments: this.safeParseJson(tc.function?.arguments ?? ""),
+      }));
+    return { text, toolCalls };
   }
 
-  private async completeOpenAI(request: GenerateRequest): Promise<string> {
+  private async completeOpenAI(request: GenerateRequest): Promise<GenerateResult> {
     return this.completeOpenAICompatible(request, {
       url: "https://api.openai.com/v1/chat/completions",
       defaultModel: defaultModelFor("openai"),
@@ -311,14 +410,14 @@ export class APIProvider implements Provider {
   }
 
   /** Groq's OpenAI-compatible chat completions endpoint (no extra headers). */
-  private async completeGroq(request: GenerateRequest): Promise<string> {
+  private async completeGroq(request: GenerateRequest): Promise<GenerateResult> {
     return this.completeOpenAICompatible(request, {
       url: "https://api.groq.com/openai/v1/chat/completions",
       defaultModel: defaultModelFor("groq"),
     });
   }
 
-  private async completeOpenRouter(request: GenerateRequest): Promise<string> {
+  private async completeOpenRouter(request: GenerateRequest): Promise<GenerateResult> {
     return this.completeOpenAICompatible(request, {
       url: "https://openrouter.ai/api/v1/chat/completions",
       extraHeaders: {
@@ -329,7 +428,7 @@ export class APIProvider implements Provider {
     });
   }
 
-  private async completeGoogle(request: GenerateRequest): Promise<string> {
+  private async completeGoogle(request: GenerateRequest): Promise<GenerateResult> {
     const model = this.model.trim() || defaultModelFor("google");
     // AI Studio's documented auth puts the key in the x-goog-api-key header
     // rather than the URL query string.
@@ -338,32 +437,60 @@ export class APIProvider implements Provider {
       encodeURIComponent(model) +
       ":generateContent";
 
+    // When tools are offered, declare them as functionDeclarations for this
+    // turn. History (contents) is unchanged — still plain text + inlineData.
+    const hasTools = !!request.tools && request.tools.length > 0;
+    const body: Record<string, unknown> = {
+      // The stable prefix goes in systemInstruction so Gemini can cache it.
+      systemInstruction: { parts: [{ text: request.system }] },
+      // Map roles to Gemini's vocabulary ("assistant" -> "model") and merge
+      // consecutive same-role turns — Gemini wants alternating user/model.
+      // Images, if present, are encoded as inlineData parts after the text.
+      contents: this.mergeAlternating(request.messages).map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: this.geminiParts(m),
+      })),
+    };
+    if (hasTools && request.tools) {
+      body.tools = [
+        {
+          functionDeclarations: request.tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          })),
+        },
+      ];
+    }
+
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "x-goog-api-key": this.apiKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        // The stable prefix goes in systemInstruction so Gemini can cache it.
-        systemInstruction: { parts: [{ text: request.system }] },
-        // Map roles to Gemini's vocabulary ("assistant" -> "model") and merge
-        // consecutive same-role turns — Gemini wants alternating user/model.
-        // Images, if present, are encoded as inlineData parts after the text.
-        contents: this.mergeAlternating(request.messages).map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: this.geminiParts(m),
-        })),
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = (await this.readJson(response)) as GoogleResponse;
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof text !== "string") {
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    // Concatenate text parts; map each functionCall part to a ToolCall.
+    const text = parts
+      .filter((p) => typeof p.text === "string")
+      .map((p) => p.text as string)
+      .join("");
+    const toolCalls: ToolCall[] = parts
+      .filter((p) => typeof p.functionCall?.name === "string")
+      .map((p) => ({
+        name: p.functionCall?.name as string,
+        arguments: (p.functionCall?.args ?? {}) as Record<string, unknown>,
+      }));
+
+    if (text.length === 0 && toolCalls.length === 0) {
       throw new Error(
-        `Google response missing candidates[0].content.parts[0].text: ${JSON.stringify(data)}`
+        `Google response missing candidates[0].content.parts text: ${JSON.stringify(data)}`
       );
     }
-    return text;
+    return { text, toolCalls };
   }
 }

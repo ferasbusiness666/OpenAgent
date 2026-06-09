@@ -12,7 +12,7 @@ import { AgentMemory } from "../src/memory/agent-md.js";
 import { SessionManager } from "../src/memory/session-manager.js";
 import type { Phase } from "../src/agent/plan.js";
 import type { Provider } from "../src/providers/index.js";
-import type { GenerateRequest } from "../src/providers/messages.js";
+import type { GenerateRequest, GenerateResult } from "../src/providers/messages.js";
 import { setActiveWorkspace } from "../src/config/index.js";
 
 class ScriptedProvider implements Provider {
@@ -21,36 +21,45 @@ class ScriptedProvider implements Provider {
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string): Promise<GenerateResult> {
     return this.generate({ system: prompt, messages: [] });
   }
 
-  async generate(_request: GenerateRequest): Promise<string> {
+  async generate(_request: GenerateRequest): Promise<GenerateResult> {
     this.calls += 1;
     if (this.calls === 1) {
       // Planning call — return an ordered JSON phase array.
-      return JSON.stringify([
-        { title: "Step one", description: "do x" },
-        { title: "Step two", description: "do y" },
-      ]);
+      return {
+        text: JSON.stringify([
+          { title: "Step one", description: "do x" },
+          { title: "Step two", description: "do y" },
+        ]),
+        toolCalls: [],
+      };
     }
     if (this.calls === 2) {
       // First tool action, reporting phase 1 completed.
-      return JSON.stringify({
-        thought: "Creating the file for phase 1.",
-        action: "filesystem",
-        params: { operation: "write", path: "plan-ok.txt", content: "ok" },
-        progress: { phase: 1, status: "completed", finding: "created file" },
-      });
+      return {
+        text: JSON.stringify({
+          thought: "Creating the file for phase 1.",
+          action: "filesystem",
+          params: { operation: "write", path: "plan-ok.txt", content: "ok" },
+          progress: { phase: 1, status: "completed", finding: "created file" },
+        }),
+        toolCalls: [],
+      };
     }
     // Finish, reporting phase 2 completed.
-    return JSON.stringify({
-      thought: "All phases complete.",
-      action: "done",
-      params: {},
-      message: "all done",
-      progress: { phase: 2, status: "completed" },
-    });
+    return {
+      text: JSON.stringify({
+        thought: "All phases complete.",
+        action: "done",
+        params: {},
+        message: "all done",
+        progress: { phase: 2, status: "completed" },
+      }),
+      toolCalls: [],
+    };
   }
 }
 

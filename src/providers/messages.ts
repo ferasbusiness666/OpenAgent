@@ -39,6 +39,31 @@ export interface ChatMessage {
   images?: ImageData[];
 }
 
+/** A tool the model may call (function calling). `parameters` is JSON Schema
+ *  for the arguments object. Providers translate this to their native format. */
+export interface ToolSchema {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/** A single tool call the model emitted this turn. */
+export interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Structured model output: any free text the model produced plus the tool calls
+ * it made (empty when it just replied with text — e.g. planning/reflection,
+ * which pass no tools). Native function-calling fills `toolCalls` directly; the
+ * CLI provider parses its JSON reply into the same shape.
+ */
+export interface GenerateResult {
+  text: string;
+  toolCalls: ToolCall[];
+}
+
 /** A single provider turn: a cacheable system prefix + the running history. */
 export interface GenerateRequest {
   /** STABLE, cacheable prefix. Must not change across turns of one session. */
@@ -46,4 +71,8 @@ export interface GenerateRequest {
   /** Role-tagged history, alternating user/assistant, starting with `user`.
    *  The final message is the current turn (carrying time + recited plan). */
   messages: ChatMessage[];
+  /** When present, the provider offers these as native tools (function calling)
+   *  for THIS turn. History stays plain text; only the current action is
+   *  structured. Absent for plain-text turns (planning, self-check). */
+  tools?: ToolSchema[];
 }

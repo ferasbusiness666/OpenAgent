@@ -7,7 +7,7 @@ import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
 import type { Provider } from "../src/providers/index.js";
-import type { GenerateRequest } from "../src/providers/messages.js";
+import type { GenerateRequest, GenerateResult } from "../src/providers/messages.js";
 import { App } from "../src/ui/App.js";
 
 class ScriptedProvider implements Provider {
@@ -16,32 +16,41 @@ class ScriptedProvider implements Provider {
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string): Promise<GenerateResult> {
     return this.generate({ system: prompt, messages: [] });
   }
 
-  async generate(_request: GenerateRequest): Promise<string> {
+  async generate(_request: GenerateRequest): Promise<GenerateResult> {
     this.calls += 1;
     if (this.calls === 1) {
       // First call is now the PLANNING call — return a JSON phase array.
-      return JSON.stringify([
-        { title: "Inspect the workspace", description: "List the workspace contents." },
-      ]);
+      return {
+        text: JSON.stringify([
+          { title: "Inspect the workspace", description: "List the workspace contents." },
+        ]),
+        toolCalls: [],
+      };
     }
     if (this.calls === 2) {
-      return JSON.stringify({
-        thought: "Listing the workspace first.",
-        action: "filesystem",
-        params: { operation: "list", path: "" },
-        message: "Looking around.",
-      });
+      return {
+        text: JSON.stringify({
+          thought: "Listing the workspace first.",
+          action: "filesystem",
+          params: { operation: "list", path: "" },
+          message: "Looking around.",
+        }),
+        toolCalls: [],
+      };
     }
-    return JSON.stringify({
-      thought: "All set.",
-      action: "done",
-      params: {},
-      message: "Finished the demo task.",
-    });
+    return {
+      text: JSON.stringify({
+        thought: "All set.",
+        action: "done",
+        params: {},
+        message: "Finished the demo task.",
+      }),
+      toolCalls: [],
+    };
   }
 }
 

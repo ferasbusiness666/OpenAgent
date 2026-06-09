@@ -9,7 +9,7 @@
 import { buildGenerateRequest } from "../src/agent/planner.js";
 import { APIProvider } from "../src/providers/api.js";
 import { CLIProvider } from "../src/providers/cli.js";
-import type { GenerateRequest } from "../src/providers/index.js";
+import type { GenerateRequest, GenerateResult } from "../src/providers/index.js";
 import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
@@ -78,21 +78,21 @@ async function main(): Promise<void> {
     const provider: Provider = {
       name: "scripted-vision",
       supportsVision: true,
-      async generate(r: GenerateRequest): Promise<string> {
+      async generate(r: GenerateRequest): Promise<GenerateResult> {
         const text = r.system + "\n" + r.messages.map((m) => m.content).join("\n");
         if (text.includes("planning module")) {
-          return JSON.stringify([{ title: "shot", description: "screenshot the page" }]);
+          return { text: JSON.stringify([{ title: "shot", description: "screenshot the page" }]), toolCalls: [] };
         }
         // If any message carries an image, the screenshot reached the model.
         if (r.messages.some((m) => (m.images?.length ?? 0) > 0)) sawImageOnNextTurn = true;
         step += 1;
         if (step === 1) {
-          return JSON.stringify({ thought: "open", action: "browser", params: { operation: "navigate", url: "data:text/html,<h1>hi</h1>" } });
+          return { text: JSON.stringify({ thought: "open", action: "browser", params: { operation: "navigate", url: "data:text/html,<h1>hi</h1>" } }), toolCalls: [] };
         }
         if (step === 2) {
-          return JSON.stringify({ thought: "shoot", action: "browser", params: { operation: "screenshot" } });
+          return { text: JSON.stringify({ thought: "shoot", action: "browser", params: { operation: "screenshot" } }), toolCalls: [] };
         }
-        return JSON.stringify({ thought: "done", action: "done", params: {}, message: "ok" });
+        return { text: JSON.stringify({ thought: "done", action: "done", params: {}, message: "ok" }), toolCalls: [] };
       },
     };
 

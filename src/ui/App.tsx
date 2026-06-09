@@ -1311,6 +1311,7 @@ function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
     },
     { name: "code", detail: "run code (js sandbox / python / node / bash / powershell) in resource-limited workers" },
     { name: "memory", detail: "long-term memory — remember / recall with BM25 keyword search" },
+    { name: "serve", detail: "host a workspace directory on localhost and return the URL (local preview)" },
   ];
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>

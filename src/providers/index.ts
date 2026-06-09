@@ -1,7 +1,7 @@
 import { getConfig, type Config } from "../config/index.js";
 import { CLIProvider } from "./cli.js";
 import { APIProvider } from "./api.js";
-import type { GenerateRequest } from "./messages.js";
+import type { GenerateRequest, GenerateResult } from "./messages.js";
 
 /**
  * Uniform interface the agent loop programs against. Each turn it assembles a
@@ -18,10 +18,21 @@ export interface Provider {
    *  true; CLI providers (text-only stdout) are false. The loop only attaches
    *  screenshots when this is true and vision is enabled in config. */
   readonly supportsVision: boolean;
-  generate(request: GenerateRequest): Promise<string>;
+  /** Generate the next turn. When `request.tools` is set, API providers use
+   *  native function-calling and return structured `toolCalls`; otherwise they
+   *  return text only (planning / self-check). */
+  generate(request: GenerateRequest): Promise<GenerateResult>;
 }
 
-export type { ChatRole, ChatMessage, ImageData, GenerateRequest } from "./messages.js";
+export type {
+  ChatRole,
+  ChatMessage,
+  ImageData,
+  ToolSchema,
+  ToolCall,
+  GenerateResult,
+  GenerateRequest,
+} from "./messages.js";
 export { CLIProvider } from "./cli.js";
 export { APIProvider } from "./api.js";
 export { KNOWN_CLIS, detectClis } from "./detector.js";

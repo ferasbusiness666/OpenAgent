@@ -4,6 +4,7 @@ import type { Phase } from "./plan.js";
 import { renderPlan } from "./plan.js";
 import type { GenerateRequest, ChatMessage, ImageData } from "../providers/messages.js";
 import { extractJsonObject } from "../util/json.js";
+import { AGENT_TOOLS } from "./tool-schemas.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
@@ -20,6 +21,8 @@ export const AgentResponseSchema = z.object({
     "research",
     "code",
     "memory",
+    "serve",
+    "update_plan",
     "done",
     "stuck",
   ]),
@@ -75,10 +78,16 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 7. memory — durable long-term memory, searchable with keyword (BM25) ranking.
    params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "query": "search text (recall)", "topK": number (optional) }
 
-8. done — the task is fully complete. Put the final answer to the user in "message".
+8. serve — host a workspace directory over HTTP on localhost and return the URL (local preview).
+   params: { "dir": "workspace-relative dir (optional, default the workspace root)", "port": number (optional) }
+
+9. update_plan — report progress on a phase (alternative to the "progress" field).
+   params: { "phase": number, "status": "in_progress" | "completed" | "failed", "finding": "short note (optional)" }
+
+10. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-9. stuck — you cannot proceed without the user. Explain what you need in "message".
+11. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -108,7 +117,10 @@ ${opts.agentMd}
 # Tools
 ${TOOL_REFERENCE}
 
-# Response format — THIS IS MANDATORY
+# How to act
+If you have been given tools (function calling), CALL exactly one tool per step — the tool name is the action and its arguments are the params. Otherwise, respond with the SINGLE JSON object described below.
+
+# Response format (when not using tools) — THIS IS MANDATORY
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
@@ -195,7 +207,10 @@ export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
     messages.push(images ? { role: "user", content: finalTurn, images } : { role: "user", content: finalTurn });
   }
 
-  return { system, messages };
+  // Offer the action set as NATIVE tools. API providers use function-calling and
+  // return a structured action; providers without tools (CLI) fall back to the
+  // JSON action protocol described in the system prompt.
+  return { system, messages, tools: [...AGENT_TOOLS] };
 }
 
 // ---- Reflection / self-critique --------------------------------------------

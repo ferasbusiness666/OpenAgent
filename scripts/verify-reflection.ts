@@ -8,7 +8,7 @@ import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
 import { getConfig, saveConfig, setActiveWorkspace } from "../src/config/index.js";
-import type { Provider, GenerateRequest } from "../src/providers/index.js";
+import type { Provider, GenerateRequest, GenerateResult } from "../src/providers/index.js";
 import os from "node:os";
 import path from "node:path";
 import fs from "fs-extra";
@@ -25,19 +25,19 @@ class CriticProvider implements Provider {
   readonly supportsVision = false;
   reflections = 0;
   doneAttempts = 0;
-  async generate(req: GenerateRequest): Promise<string> {
+  async generate(req: GenerateRequest): Promise<GenerateResult> {
     const text = textOf(req);
     if (text.includes("planning module")) {
-      return JSON.stringify([{ title: "do", description: "the work" }]);
+      return { text: JSON.stringify([{ title: "do", description: "the work" }]), toolCalls: [] };
     }
     if (text.includes("SELF-CHECK")) {
       this.reflections += 1;
       return this.reflections === 1
-        ? JSON.stringify({ complete: false, reason: "a step is missing", nextStep: "finish it" })
-        : JSON.stringify({ complete: true, reason: "all good" });
+        ? { text: JSON.stringify({ complete: false, reason: "a step is missing", nextStep: "finish it" }), toolCalls: [] }
+        : { text: JSON.stringify({ complete: true, reason: "all good" }), toolCalls: [] };
     }
     this.doneAttempts += 1;
-    return JSON.stringify({ thought: "I think I'm done", action: "done", params: {}, message: "finished" });
+    return { text: JSON.stringify({ thought: "I think I'm done", action: "done", params: {}, message: "finished" }), toolCalls: [] };
   }
 }
 
@@ -46,11 +46,11 @@ class EagerProvider implements Provider {
   readonly name = "eager";
   readonly supportsVision = false;
   reflections = 0;
-  async generate(req: GenerateRequest): Promise<string> {
+  async generate(req: GenerateRequest): Promise<GenerateResult> {
     const text = textOf(req);
-    if (text.includes("planning module")) return JSON.stringify([{ title: "do", description: "it" }]);
-    if (text.includes("SELF-CHECK")) { this.reflections += 1; return JSON.stringify({ complete: false, reason: "x" }); }
-    return JSON.stringify({ thought: "done", action: "done", params: {}, message: "done" });
+    if (text.includes("planning module")) return { text: JSON.stringify([{ title: "do", description: "it" }]), toolCalls: [] };
+    if (text.includes("SELF-CHECK")) { this.reflections += 1; return { text: JSON.stringify({ complete: false, reason: "x" }), toolCalls: [] }; }
+    return { text: JSON.stringify({ thought: "done", action: "done", params: {}, message: "done" }), toolCalls: [] };
   }
 }
 

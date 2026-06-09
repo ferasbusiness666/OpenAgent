@@ -8,7 +8,7 @@ import { AgentLoop } from "../src/agent/loop.js";
 import { SessionMemory } from "../src/memory/session.js";
 import { AgentMemory } from "../src/memory/agent-md.js";
 import type { Provider } from "../src/providers/index.js";
-import type { GenerateRequest } from "../src/providers/messages.js";
+import type { GenerateRequest, GenerateResult } from "../src/providers/messages.js";
 import { getConfig, resolveWorkspacePath, setActiveWorkspace } from "../src/config/index.js";
 
 class ScriptedProvider implements Provider {
@@ -17,40 +17,49 @@ class ScriptedProvider implements Provider {
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string): Promise<GenerateResult> {
     return this.generate({ system: prompt, messages: [] });
   }
 
-  async generate(_request: GenerateRequest): Promise<string> {
+  async generate(_request: GenerateRequest): Promise<GenerateResult> {
     this.calls += 1;
     if (this.calls === 1) {
       // First call is now the PLANNING call — return a JSON phase array.
-      return JSON.stringify([
-        { title: "Create the file", description: "Write hello.txt with the content." },
-      ]);
+      return {
+        text: JSON.stringify([
+          { title: "Create the file", description: "Write hello.txt with the content." },
+        ]),
+        toolCalls: [],
+      };
     }
     if (this.calls === 2) {
       // Second turn: write the file. Intentionally wrapped in prose + fences to
       // exercise the JSON extractor's tolerance.
-      return [
-        "Sure, here is my next step:",
-        "```json",
-        JSON.stringify({
-          thought: "I will create hello.txt with the requested content.",
-          action: "filesystem",
-          params: { operation: "write", path: "hello.txt", content: "Hello World" },
-          message: "Creating the file.",
-        }),
-        "```",
-      ].join("\n");
+      return {
+        text: [
+          "Sure, here is my next step:",
+          "```json",
+          JSON.stringify({
+            thought: "I will create hello.txt with the requested content.",
+            action: "filesystem",
+            params: { operation: "write", path: "hello.txt", content: "Hello World" },
+            message: "Creating the file.",
+          }),
+          "```",
+        ].join("\n"),
+        toolCalls: [],
+      };
     }
     // Third turn: the write succeeded, so finish.
-    return JSON.stringify({
-      thought: "The file was written successfully. Task complete.",
-      action: "done",
-      params: {},
-      message: "Created hello.txt with the content 'Hello World'.",
-    });
+    return {
+      text: JSON.stringify({
+        thought: "The file was written successfully. Task complete.",
+        action: "done",
+        params: {},
+        message: "Created hello.txt with the content 'Hello World'.",
+      }),
+      toolCalls: [],
+    };
   }
 }
 
