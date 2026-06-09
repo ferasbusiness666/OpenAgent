@@ -20,6 +20,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/workers", description: "Show the parallel worker pool activity" },
   { name: "/memory", description: "List long-term memory, or /memory <query> to search it" },
   { name: "/schedule", description: "List schedules; /schedule add <spec> <task> | /schedule remove <id>" },
+  { name: "/onboarding", description: "Replay the first-run onboarding walkthrough" },
   { name: "/clear", description: "Clear the conversation (stays in the same project)" },
   { name: "/help", description: "Show the list of commands" },
 ];

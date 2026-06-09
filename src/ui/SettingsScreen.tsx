@@ -31,6 +31,10 @@ const FIELDS: Field[] = [
   { key: "telegramToken", label: "Telegram token", type: "secret" },
   { key: "telegramChatId", label: "Telegram chat ID", type: "text" },
   { key: "tavilyApiKey", label: "Tavily API key", type: "secret" },
+  { key: "requireCommandApproval", label: "Require command approval", type: "enum", options: ["true", "false"] },
+  { key: "permSuggestEdits", label: "Allow file edits", type: "enum", options: ["true", "false"] },
+  { key: "permReadFiles", label: "Allow reading files", type: "enum", options: ["true", "false"] },
+  { key: "onboardingCompleted", label: "Onboarding completed", type: "enum", options: ["true", "false"] },
 ];
 
 /** Mask a secret for display so credentials never appear on screen at rest. */
@@ -60,6 +64,14 @@ function helpFor(field: Field, detected: string[]): string {
       return "validated via getMe; leave blank to disable Telegram";
     case "tavilyApiKey":
       return "API key for the web-research tool (tavily.com); or set TAVILY_API_KEY in the environment";
+    case "requireCommandApproval":
+      return "when true, the agent pauses for your y/n approval before running shell commands (TUI only)";
+    case "permSuggestEdits":
+      return "when false, the agent cannot write/delete/mkdir files (it can still read)";
+    case "permReadFiles":
+      return "informational; the agent always needs to read the workspace to be useful";
+    case "onboardingCompleted":
+      return "set to false (or run /onboarding) to replay the first-run walkthrough";
     default:
       return "";
   }

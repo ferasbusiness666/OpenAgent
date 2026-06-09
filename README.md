@@ -7,6 +7,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 ## Features
 
 - **Autonomous loop** — ReAct-style plan → act → observe → correct until the task is done.
+- **Guided onboarding & permission control** — a first-run 7-step walkthrough explains what OpenAgent does, how it attaches to a workspace, and how much control you keep. You choose permissions (read files / suggest edits / require command approval); with command approval on, the agent **pauses for your y/n** before running a shell command, and turning off "suggest edits" blocks file writes. Replay it any time with `/onboarding`. (Headless `--task` runs stay fully autonomous.)
 - **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
@@ -62,7 +63,8 @@ When you launch in a directory, Open Agent walks through this sequence before th
 2. **Known-project detection** — if a project is already registered for this directory, it asks `Welcome back to <name>. Continue? (Y/n)`. Yes loads that project and its last saved session straight into chat.
 3. **New project setup** — otherwise it registers a new project for the current directory, asking for a project name (defaulting to the directory name).
 4. **First-run provider wizard** — runs **only if no provider is configured yet**. It lists the hosted API providers first (OpenAI, Anthropic, Google AI Studio, Groq, OpenRouter) — pick one, paste its key, and a default model is chosen for you. Any installed AI CLIs are offered after that as an optional local alternative. Nothing else (no Telegram, no workspace path) is asked here — those are configured later from `/settings`.
-5. **Chat UI** — you land in the chat. Type a task, or type `/` to see the command menu.
+5. **First-run onboarding** — on a brand-new setup, a 7-step guided walkthrough runs (Welcome → understand the project → make changes safely → terminal/debugging help → choose workspace start mode → permissions & control → ready). It's keyboard-driven (Enter/→ next, ← back, `s` skip) and saves your permission choices. Once completed (or skipped) it doesn't reappear; replay it with `/onboarding` or by setting `onboardingCompleted` to false in `/settings`.
+6. **Chat UI** — you land in the chat. Type a task, or type `/` to see the command menu.
 
 ### Slash commands
 
@@ -78,6 +80,7 @@ When you launch in a directory, Open Agent walks through this sequence before th
 | `/memory` | List long-term memory, or `/memory <query>` to BM25-search it. |
 | `/schedule` | List schedules; `/schedule add <30s\|5m\|HH:MM\|ISO> <task>` to add, `/schedule remove <id>` to delete. |
 | `/clear` | Clear the conversation (stays in the same project). |
+| `/onboarding` | Replay the first-run onboarding walkthrough. |
 | `/help` | Show the command list. |
 
 Switching provider or model never resets the conversation: the same on-disk session history is carried straight into the new provider's context.
@@ -106,6 +109,9 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "groq" \| "openrouter"` (api mode). `google` is Google AI Studio (Gemini, `x-goog-api-key` header). `groq` and `openrouter` are OpenAI-compatible (`https://api.groq.com/openai/v1`, `https://openrouter.ai/api/v1`). |
 | `activeModel` | Model name/id to use (e.g. `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.0-flash`, `llama-3.3-70b-versatile`, or an OpenRouter id like `openai/gpt-4o`); blank = the provider's default. |
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
+| `requireCommandApproval` | When true (default), the agent pauses for your y/n approval before running a shell command in the TUI. |
+| `permSuggestEdits` / `permReadFiles` | Permission preferences from onboarding. `permSuggestEdits=false` blocks file writes/deletes; `permReadFiles` is informational (reads are always allowed). |
+| `onboardingCompleted` | Whether the first-run walkthrough has been completed/skipped. Set false (or run `/onboarding`) to replay it. |
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |
 
 You can edit all of these live from inside the app with `/settings`. Values are **validated before they are saved** — an invalid value is rejected and not written:
@@ -197,7 +203,7 @@ src/
              session-store (session file paths/serialization),
              session-manager (resumable AgentState), longterm (BM25 memory),
              projects (projects.json registry), agent-md (durable)
-  ui/        + WorkerPanel (parallel-worker visualization)
+  ui/        + WorkerPanel (parallel-worker visualization), Onboarding (7-step first-run flow)
   telegram/  remote-control bridge
   config/    zod-validated config, validate (live settings validation)
   util/      json (extract/parse JSON from noisy output)

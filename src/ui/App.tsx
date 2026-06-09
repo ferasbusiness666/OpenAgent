@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Box, Text, useInput, useApp } from "ink";
-import type { AgentLoop } from "../agent/loop.js";
+import type { AgentLoop, ApprovalRequest } from "../agent/loop.js";
 import type { Phase } from "../agent/plan.js";
 import {
   saveConfig,
@@ -39,6 +39,7 @@ import { SettingsScreen } from "./SettingsScreen.js";
 import { ModelPicker } from "./ModelPicker.js";
 import { ProviderPicker } from "./ProviderPicker.js";
 import { SessionsPanel } from "./SessionsPanel.js";
+import { Onboarding, type OnboardingResult } from "./Onboarding.js";
 import { WorkerPanel } from "./WorkerPanel.js";
 import { getWorkerPool } from "../workers/pool.js";
 import type { WorkerStatus } from "../workers/types.js";
@@ -67,7 +68,7 @@ export type AgentStatus =
   | { state: "error" };
 
 /** Which screen mode the app is in. */
-type Mode = "projects" | "chat";
+type Mode = "onboarding" | "projects" | "chat";
 
 /** Which (if any) overlay is open on top of the chat. */
 type Overlay =
@@ -144,6 +145,22 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
           return { error: "apiProvider must be one of: " + API_PROVIDER_IDS.join(", ") };
         }
         partial.apiProvider = value;
+        break;
+      case "onboardingCompleted":
+        if (value !== "true" && value !== "false") return { error: "onboardingCompleted must be 'true' or 'false'." };
+        partial.onboardingCompleted = value === "true";
+        break;
+      case "permReadFiles":
+        if (value !== "true" && value !== "false") return { error: "permReadFiles must be 'true' or 'false'." };
+        partial.permReadFiles = value === "true";
+        break;
+      case "permSuggestEdits":
+        if (value !== "true" && value !== "false") return { error: "permSuggestEdits must be 'true' or 'false'." };
+        partial.permSuggestEdits = value === "true";
+        break;
+      case "requireCommandApproval":
+        if (value !== "true" && value !== "false") return { error: "requireCommandApproval must be 'true' or 'false'." };
+        partial.requireCommandApproval = value === "true";
         break;
       default:
         // Ignore unknown keys.
@@ -252,7 +269,14 @@ export function App({
   scheduler,
 }: AppProps) {
   const { exit } = useApp();
-  const [mode, setMode] = useState<Mode>(project || initialTask ? "chat" : "projects");
+  const [mode, setMode] = useState<Mode>(() => {
+    // First-run onboarding takes precedence in interactive mode. A headless/test
+    // run (initialTask set) always skips straight to chat.
+    if (!initialTask && !getConfig().onboardingCompleted) {
+      return "onboarding";
+    }
+    return project || initialTask ? "chat" : "projects";
+  });
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>({ state: "idle" });
@@ -269,6 +293,8 @@ export function App({
   const [phases, setPhases] = useState<Phase[]>(() => agentLoop.plan);
   // Live snapshot of the parallel worker pool (Phase 4 visualization).
   const [workers, setWorkers] = useState<WorkerStatus[]>([]);
+  // Pending shell-command approval request (onboarding Step 6 "stay in control").
+  const [approval, setApproval] = useState<{ summary: string; resolve: (ok: boolean) => void } | null>(null);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
   const [, setResizeTick] = useState(0);
 
@@ -369,6 +395,52 @@ export function App({
       pool.off("snapshot", onSnapshot);
     };
   }, []);
+
+  // Register an approval handler so the loop can pause shell commands for the
+  // user (when "require command approval" is on). The handler returns a promise
+  // resolved by the y/n prompt below. Cleared on unmount so a headless/teardown
+  // path stays autonomous.
+  useEffect(() => {
+    const handler = (req: ApprovalRequest): Promise<boolean> =>
+      new Promise<boolean>((resolve) => setApproval({ summary: req.summary, resolve }));
+    agentLoop.setApprovalHandler(handler);
+    return () => agentLoop.setApprovalHandler(undefined);
+  }, [agentLoop]);
+
+  // ---- Onboarding completion / skip -----------------------------------------
+
+  const finishOnboarding = useCallback(
+    (result: OnboardingResult) => {
+      try {
+        saveConfig({
+          onboardingCompleted: true,
+          permReadFiles: result.permissions.readFiles,
+          permSuggestEdits: result.permissions.suggestEdits,
+          requireCommandApproval: result.permissions.requireCommandApproval,
+        });
+        setConfig(getConfig());
+      } catch (err) {
+        push({ kind: "error", text: `Could not save setup: ${errText(err)}` });
+      }
+      // Workspace routing: current-dir continues straight into chat; the other
+      // two open the project selector (which handles open + create).
+      setMode(result.workspaceMode === "current-dir" ? "chat" : "projects");
+      if (result.starter) {
+        setInput(result.starter);
+      }
+    },
+    [push],
+  );
+
+  const skipOnboarding = useCallback(() => {
+    try {
+      saveConfig({ onboardingCompleted: true });
+      setConfig(getConfig());
+    } catch {
+      // Non-fatal: worst case onboarding shows again next launch.
+    }
+    setMode(currentProject ? "chat" : "projects");
+  }, [currentProject]);
 
   const submitTask = useCallback(
     (task: string) => {
@@ -613,6 +685,10 @@ export function App({
           }
           break;
         }
+        case "/onboarding":
+          setOverlay("none");
+          setMode("onboarding");
+          break;
         case "/help":
           setOverlay("help");
           break;
@@ -725,7 +801,22 @@ export function App({
         setInput((prev) => prev + value);
       }
     },
-    { isActive: mode === "chat" && overlay === "none" },
+    { isActive: mode === "chat" && overlay === "none" && approval === null },
+  );
+
+  // Shell-command approval prompt: y approves, n / Esc denies.
+  useInput(
+    (value, key) => {
+      if (!approval) return;
+      if (value === "y" || value === "Y") {
+        approval.resolve(true);
+        setApproval(null);
+      } else if (value === "n" || value === "N" || key.escape) {
+        approval.resolve(false);
+        setApproval(null);
+      }
+    },
+    { isActive: approval !== null },
   );
 
   // Info panels (tools/history/help) close on any key.
@@ -759,7 +850,17 @@ export function App({
         <Text color="gray"> — autonomous local agent</Text>
       </Box>
 
-      {mode === "projects" ? (
+      {mode === "onboarding" ? (
+        <Onboarding
+          initialPermissions={{
+            readFiles: config.permReadFiles,
+            suggestEdits: config.permSuggestEdits,
+            requireCommandApproval: config.requireCommandApproval,
+          }}
+          onComplete={finishOnboarding}
+          onSkip={skipOnboarding}
+        />
+      ) : mode === "projects" ? (
         <ProjectSelector projects={projects} onOpen={openProject} onCreate={createAndOpen} />
       ) : (
         <>
@@ -768,6 +869,16 @@ export function App({
           {phases.length > 0 ? <PlanView phases={phases} /> : null}
 
           {workers.length > 0 && overlay === "none" ? <WorkerPanel workers={workers} /> : null}
+
+          {approval ? (
+            <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginTop={1}>
+              <Text color="yellow" bold>
+                Approve shell command?
+              </Text>
+              <Text color="white">{"  "}{approval.summary}</Text>
+              <Text color="gray">{"  y approve · n deny — nothing runs without your OK"}</Text>
+            </Box>
+          ) : null}
 
           {overlay === "none" ? (
             <>

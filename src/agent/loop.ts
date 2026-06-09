@@ -58,6 +58,14 @@ export interface AgentLoopOptions {
   phases?: Phase[];
 }
 
+/** A request to approve a potentially risky action (currently shell commands). */
+export interface ApprovalRequest {
+  tool: string;
+  summary: string; // e.g. the shell command being proposed
+}
+/** Resolves true to allow the action, false to deny it. */
+export type ApprovalHandler = (request: ApprovalRequest) => Promise<boolean>;
+
 // Typed on/once/off/emit overlay over Node's EventEmitter (no `any`).
 export declare interface AgentLoop {
   on<K extends keyof AgentEvents>(event: K, listener: AgentEvents[K]): this;
@@ -85,6 +93,10 @@ export class AgentLoop extends EventEmitter {
   // after a /settings change to the workspace path.
   private workspacePath: string;
   private running = false;
+  // Optional gate for interactive approval of risky actions (shell commands).
+  // When unset the loop never pauses — headless/non-interactive runs stay
+  // fully autonomous (see setApprovalHandler).
+  private approvalHandler?: ApprovalHandler;
 
   // Multi-phase planning + resumable persistence.
   private readonly planner: Planner;
@@ -136,6 +148,13 @@ export class AgentLoop extends EventEmitter {
   /** Re-read the workspace path from config (after a /settings change). */
   refreshWorkspace(): void {
     this.workspacePath = resolveWorkspacePath(getConfig());
+  }
+
+  /** Register (or clear with undefined) the handler used to approve risky
+   *  actions in interactive mode. When no handler is set the loop never pauses
+   *  (headless / non-interactive runs stay fully autonomous). */
+  setApprovalHandler(handler: ApprovalHandler | undefined): void {
+    this.approvalHandler = handler;
   }
 
   /** A copy of the current plan phases (never the internal reference). */
@@ -348,7 +367,79 @@ export class AgentLoop extends EventEmitter {
         // ---- Tool actions -----------------------------------------------------
         if (isToolAction(response.action)) {
           const params = response.params;
+          const cfg = getConfig();
+
+          // Edit gate: block file mutations when the user disabled "Suggest
+          // edits". read/list are always allowed. A block is NOT a failure, so
+          // we feed a note and continue without touching the corrector.
+          if (response.action === "filesystem") {
+            const op = typeof params.operation === "string" ? params.operation : "";
+            if (
+              !cfg.permSuggestEdits &&
+              (op === "write" || op === "delete" || op === "mkdir")
+            ) {
+              this.emit("toolCall", { tool: response.action, params });
+              const note =
+                "[filesystem] BLOCKED: file edits are turned off in your permissions " +
+                '("Suggest edits" is off). Re-enable it in /settings to allow changes, ' +
+                "or proceed without editing files.";
+              this.emit("toolResult", {
+                tool: response.action,
+                result: note,
+                success: false,
+              });
+              this.session.add({
+                role: "tool_result",
+                content: note,
+                timestamp: new Date(),
+              });
+              continue;
+            }
+          }
+
+          // Show the proposed action before any approval gate so the UI can
+          // display what the agent wants to do.
           this.emit("toolCall", { tool: response.action, params });
+
+          // Approval gate: pause shell commands for user approval in interactive
+          // mode. With no handler registered (headless / Telegram-only) the loop
+          // never pauses and stays fully autonomous. A denial is NOT a failure,
+          // so we feed a note and continue without touching the corrector.
+          if (
+            response.action === "shell" &&
+            cfg.requireCommandApproval &&
+            this.approvalHandler
+          ) {
+            const command =
+              typeof params.command === "string"
+                ? params.command
+                : stableStringify(params);
+            let approved = false;
+            try {
+              approved = await this.approvalHandler({
+                tool: "shell",
+                summary: command,
+              });
+            } catch {
+              approved = false;
+            }
+            if (!approved) {
+              const note =
+                "[shell] DENIED by the user. The command was NOT run. Choose a different " +
+                'approach, or explain what you need and use action "stuck" if you cannot proceed.';
+              this.emit("toolResult", {
+                tool: "shell",
+                result: "Command denied by the user.",
+                success: false,
+              });
+              this.session.add({
+                role: "tool_result",
+                content: note,
+                timestamp: new Date(),
+              });
+              continue;
+            }
+          }
 
           const result: ToolResult = await executeTool(response.action, params);
 

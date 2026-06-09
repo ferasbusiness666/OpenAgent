@@ -26,6 +26,18 @@ export const ConfigSchema = z.object({
   // readable from the TAVILY_API_KEY environment variable, which takes
   // precedence so the secret need never live in a file.
   tavilyApiKey: z.string().default(""),
+  // First-run onboarding (the 7-step guided intro). Set true once the user
+  // completes or skips it so it never reappears; reset it from /settings (or
+  // run /onboarding) to see it again.
+  onboardingCompleted: z.boolean().default(false),
+  // Permission preferences chosen during onboarding (Step 6) and editable in
+  // /settings. readFiles is informational (reads are always allowed);
+  // suggestEdits gates filesystem write/delete/mkdir; requireCommandApproval
+  // pauses shell commands for approve/deny in the interactive TUI (a headless
+  // --task run, which has no one to ask, always proceeds).
+  permReadFiles: z.boolean().default(true),
+  permSuggestEdits: z.boolean().default(true),
+  requireCommandApproval: z.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
