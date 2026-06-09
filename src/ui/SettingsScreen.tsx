@@ -32,6 +32,7 @@ const FIELDS: Field[] = [
   { key: "telegramChatId", label: "Telegram chat ID", type: "text" },
   { key: "tavilyApiKey", label: "Tavily API key", type: "secret" },
   { key: "requireCommandApproval", label: "Require command approval", type: "enum", options: ["true", "false"] },
+  { key: "enableVision", label: "Vision (see screenshots)", type: "enum", options: ["true", "false"] },
   { key: "permSuggestEdits", label: "Allow file edits", type: "enum", options: ["true", "false"] },
   { key: "permReadFiles", label: "Allow reading files", type: "enum", options: ["true", "false"] },
   { key: "onboardingCompleted", label: "Onboarding completed", type: "enum", options: ["true", "false"] },
@@ -66,6 +67,8 @@ function helpFor(field: Field, detected: string[]): string {
       return "API key for the web-research tool (tavily.com); or set TAVILY_API_KEY in the environment";
     case "requireCommandApproval":
       return "when true, the agent pauses for your y/n approval before running shell commands (TUI only)";
+    case "enableVision":
+      return "when true, screenshots the agent takes are sent to a vision-capable model so it can see pages";
     case "permSuggestEdits":
       return "when false, the agent cannot write/delete/mkdir files (it can still read)";
     case "permReadFiles":

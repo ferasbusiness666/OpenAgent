@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
-import type { Provider } from "../providers/index.js";
+import path from "node:path";
+import fs from "fs-extra";
+import type { Provider, ImageData } from "../providers/index.js";
 import { executeTool, type ToolResult } from "../tools/index.js";
 import { SessionMemory } from "../memory/session.js";
 import { AgentMemory } from "../memory/agent-md.js";
@@ -97,6 +99,9 @@ export class AgentLoop extends EventEmitter {
   // When unset the loop never pauses — headless/non-interactive runs stay
   // fully autonomous (see setApprovalHandler).
   private approvalHandler?: ApprovalHandler;
+  // Screenshots captured this turn, attached to the NEXT provider request so a
+  // vision-capable model can see the page. Shown once, then cleared.
+  private pendingImages: ImageData[] = [];
 
   // Multi-phase planning + resumable persistence.
   private readonly planner: Planner;
@@ -155,6 +160,35 @@ export class AgentLoop extends EventEmitter {
    *  (headless / non-interactive runs stay fully autonomous). */
   setApprovalHandler(handler: ApprovalHandler | undefined): void {
     this.approvalHandler = handler;
+  }
+
+  /**
+   * After a successful `browser screenshot`, read the saved PNG and queue it so
+   * the next provider turn can show it to a vision-capable model. Best-effort:
+   * skips silently when vision is off, the path can't be parsed, or the read
+   * fails — a screenshot we can't show just isn't shown.
+   */
+  private queueScreenshot(resultText: string): void {
+    if (!this.provider.supportsVision || !getConfig().enableVision) {
+      return;
+    }
+    const match = /([^\s"']+\.png)/i.exec(resultText);
+    const raw = match ? match[1] : undefined;
+    if (raw === undefined) {
+      return;
+    }
+    const file = path.isAbsolute(raw) ? raw : path.join(this.workspacePath, raw);
+    try {
+      if (!fs.existsSync(file)) {
+        return;
+      }
+      const data = fs.readFileSync(file).toString("base64");
+      if (data.length > 0) {
+        this.pendingImages.push({ data, mediaType: "image/png" });
+      }
+    } catch {
+      // Best-effort — ignore an unreadable screenshot.
+    }
   }
 
   /** A copy of the current plan phases (never the internal reference). */
@@ -275,13 +309,18 @@ export class AgentLoop extends EventEmitter {
       }
 
       for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+        const useVision = this.provider.supportsVision && getConfig().enableVision;
         const request = buildGenerateRequest({
           agentMd: this.agentMemory.getContent(),
           workspacePath: this.workspacePath,
           history: this.session.getHistory(),
           now: new Date(),
           phases: this.phases,
+          images: useVision && this.pendingImages.length > 0 ? this.pendingImages : undefined,
         });
+        // Screenshots are shown once: clear them whether or not vision is on, so
+        // they never accumulate across turns.
+        this.pendingImages = [];
 
         // ---- Ask the provider (stable system prefix → prompt-cache hits) -----
         let raw: string;
@@ -461,6 +500,13 @@ export class AgentLoop extends EventEmitter {
               content: `[${response.action}] ${compressObservation(result.result)}`,
               timestamp: new Date(),
             });
+            // Vision: queue a screenshot so the model can see it next turn.
+            if (
+              response.action === "browser" &&
+              params.operation === "screenshot"
+            ) {
+              this.queueScreenshot(result.result);
+            }
           } else {
             const signature = `${response.action}:${stableStringify(params)}`;
             const outcome = corrector.recordFailure(signature);

@@ -5,6 +5,40 @@ import type { GenerateRequest, ChatMessage } from "./messages.js";
 
 export type { ApiProviderName } from "./catalog.js";
 
+/**
+ * Wire shapes for the per-provider message `content` / `parts` fields. When a
+ * message carries images we send a block array in the provider's native vision
+ * format; otherwise we send the plain string (Anthropic/OpenAI) or a single
+ * text part (Gemini) exactly as before.
+ */
+interface AnthropicTextBlock {
+  type: "text";
+  text: string;
+}
+interface AnthropicImageBlock {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string };
+}
+type AnthropicContent = string | Array<AnthropicTextBlock | AnthropicImageBlock>;
+
+interface OpenAITextPart {
+  type: "text";
+  text: string;
+}
+interface OpenAIImagePart {
+  type: "image_url";
+  image_url: { url: string };
+}
+type OpenAIContent = string | Array<OpenAITextPart | OpenAIImagePart>;
+
+interface GeminiTextPart {
+  text: string;
+}
+interface GeminiInlineDataPart {
+  inlineData: { mimeType: string; data: string };
+}
+type GeminiPart = GeminiTextPart | GeminiInlineDataPart;
+
 /** Minimal shapes of the response payloads we read from each provider. */
 interface AnthropicResponse {
   content?: Array<{ type?: string; text?: string }>;
@@ -31,6 +65,9 @@ interface GoogleResponse {
  * Gemini via `systemInstruction`.
  */
 export class APIProvider implements Provider {
+  /** Hosted API models are vision-capable, so the loop may attach images. */
+  readonly supportsVision = true;
+
   private readonly apiKey: string;
   private readonly apiProvider: ApiProviderName;
   private readonly model: string;
@@ -71,7 +108,8 @@ export class APIProvider implements Provider {
    * Collapses consecutive same-role messages into one (joining content with a
    * blank line) so the array strictly alternates user/assistant. Anthropic and
    * Gemini both reject non-alternating roles; the loop already alternates, so
-   * this is a defensive guard rather than a reshape.
+   * this is a defensive guard rather than a reshape. Merging also concatenates
+   * any attached `images` so vision payloads survive the collapse.
    */
   private mergeAlternating(messages: ChatMessage[]): ChatMessage[] {
     const merged: ChatMessage[] = [];
@@ -79,11 +117,80 @@ export class APIProvider implements Provider {
       const last = merged[merged.length - 1];
       if (last && last.role === message.role) {
         last.content = `${last.content}\n\n${message.content}`;
+        const images = [...(last.images ?? []), ...(message.images ?? [])];
+        if (images.length > 0) {
+          last.images = images;
+        }
       } else {
-        merged.push({ role: message.role, content: message.content });
+        const next: ChatMessage = { role: message.role, content: message.content };
+        if (message.images && message.images.length > 0) {
+          next.images = [...message.images];
+        }
+        merged.push(next);
       }
     }
     return merged;
+  }
+
+  /**
+   * Builds an Anthropic message `content`: a plain string when there are no
+   * images, or a `[text, ...image]` block array when there are.
+   */
+  private anthropicContent(message: ChatMessage): AnthropicContent {
+    if (!message.images || message.images.length === 0) {
+      return message.content;
+    }
+    return [
+      { type: "text", text: message.content },
+      ...message.images.map(
+        (img): AnthropicImageBlock => ({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: img.mediaType,
+            data: img.data,
+          },
+        })
+      ),
+    ];
+  }
+
+  /**
+   * Builds an OpenAI-compatible message `content`: a plain string when there
+   * are no images, or a `[text, ...image_url]` part array when there are. The
+   * image is inlined as a `data:` URI, which OpenAI/Groq/OpenRouter accept.
+   */
+  private openAIContent(message: ChatMessage): OpenAIContent {
+    if (!message.images || message.images.length === 0) {
+      return message.content;
+    }
+    return [
+      { type: "text", text: message.content },
+      ...message.images.map(
+        (img): OpenAIImagePart => ({
+          type: "image_url",
+          image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+        })
+      ),
+    ];
+  }
+
+  /**
+   * Builds Gemini message `parts`: a single text part when there are no images,
+   * or a `[text, ...inlineData]` part array when there are.
+   */
+  private geminiParts(message: ChatMessage): GeminiPart[] {
+    if (!message.images || message.images.length === 0) {
+      return [{ text: message.content }];
+    }
+    return [
+      { text: message.content },
+      ...message.images.map(
+        (img): GeminiInlineDataPart => ({
+          inlineData: { mimeType: img.mediaType, data: img.data },
+        })
+      ),
+    ];
   }
 
   private async readJson(response: Response): Promise<unknown> {
@@ -125,10 +232,11 @@ export class APIProvider implements Provider {
           },
         ],
         // Merge consecutive same-role messages — Anthropic rejects non-alternating
-        // roles. Roles are already "user"/"assistant" from the request.
+        // roles. Roles are already "user"/"assistant" from the request. Images,
+        // if present, are encoded as native image blocks alongside the text.
         messages: this.mergeAlternating(request.messages).map((m) => ({
           role: m.role,
-          content: m.content,
+          content: this.anthropicContent(m),
         })),
       }),
     });
@@ -175,7 +283,12 @@ export class APIProvider implements Provider {
         model: this.model.trim() || defaultModel,
         messages: [
           { role: "system", content: request.system },
-          ...request.messages,
+          // Per message: plain string content, or a text+image_url part array
+          // when the message carries images.
+          ...request.messages.map((m) => ({
+            role: m.role,
+            content: this.openAIContent(m),
+          })),
         ],
       }),
     });
@@ -236,9 +349,10 @@ export class APIProvider implements Provider {
         systemInstruction: { parts: [{ text: request.system }] },
         // Map roles to Gemini's vocabulary ("assistant" -> "model") and merge
         // consecutive same-role turns — Gemini wants alternating user/model.
+        // Images, if present, are encoded as inlineData parts after the text.
         contents: this.mergeAlternating(request.messages).map((m) => ({
           role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
+          parts: this.geminiParts(m),
         })),
       }),
     });

@@ -20,6 +20,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-run";
+  readonly supportsVision = false;
   async generate(req: GenerateRequest): Promise<string> {
     const text = req.system + "\n" + req.messages.map((m) => m.content).join("\n");
     if (text.includes("planning module")) {

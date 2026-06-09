@@ -38,6 +38,9 @@ export const ConfigSchema = z.object({
   permReadFiles: z.boolean().default(true),
   permSuggestEdits: z.boolean().default(true),
   requireCommandApproval: z.boolean().default(true),
+  // Vision: when true, screenshots the agent takes are sent to vision-capable
+  // API models so it can "see" web pages. Ignored by CLI / text-only providers.
+  enableVision: z.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

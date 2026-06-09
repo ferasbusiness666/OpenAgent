@@ -12,6 +12,7 @@ import { App } from "../src/ui/App.js";
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-ui";
+  readonly supportsVision = false;
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */

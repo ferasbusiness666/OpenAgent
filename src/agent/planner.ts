@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Message } from "../memory/session.js";
 import type { Phase } from "./plan.js";
 import { renderPlan } from "./plan.js";
-import type { GenerateRequest, ChatMessage } from "../providers/messages.js";
+import type { GenerateRequest, ChatMessage, ImageData } from "../providers/messages.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
@@ -52,7 +52,10 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
    params: { "operation": "read" | "write" | "list" | "delete" | "mkdir", "path": "string", "content": "string (only for write)" }
 
 3. browser — drive a headless Chromium browser.
-   params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "getHtml", "url": "string (for navigate)", "selector": "string (for click/type)", "text": "string (for type)" }
+   params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "readText" | "getHtml" | "waitFor" | "scroll" | "press",
+             "url": "(navigate)", "selector": "(click/type/waitFor)", "text": "(type)", "key": "(press, e.g. Enter)", "target": "bottom|top|down|up (scroll)", "timeout": number (waitFor, ms) }
+   "readText" returns clean main/article text; "waitFor" waits for a selector; "scroll" loads lazy content; "press" sends a key.
+   After a "screenshot", the image is shown back to you on your next turn (with a vision-capable model) so you can SEE the page and reason about it visually.
 
 4. github — GitHub access (requires the GITHUB_TOKEN environment variable). Read AND write operations.
    params: { "operation": "listRepos" | "readFile" | "listIssues" | "createIssue" | "commentIssue" | "closeIssue" | "listPullRequests" | "getPullRequest" | "createPullRequest",
@@ -153,6 +156,8 @@ export interface PromptOptions {
   now?: Date;
   /** Current multi-phase plan, recited in the final user turn. */
   phases?: Phase[];
+  /** Images (e.g. a screenshot) to attach to the final user turn for vision. */
+  images?: ImageData[];
 }
 
 /**
@@ -178,12 +183,15 @@ export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
     `# Your turn\nRespond now with the SINGLE JSON object for your next action. Output only the JSON.`;
 
   // Append the volatile turn to the last user message (keeps roles alternating)
-  // or as a fresh user message if the last turn was the assistant.
+  // or as a fresh user message if the last turn was the assistant. Any vision
+  // images ride on that same final user message.
+  const images = opts.images && opts.images.length > 0 ? opts.images : undefined;
   const last = messages[messages.length - 1];
   if (last && last.role === "user") {
     last.content = `${last.content}\n\n${finalTurn}`;
+    if (images) last.images = images;
   } else {
-    messages.push({ role: "user", content: finalTurn });
+    messages.push(images ? { role: "user", content: finalTurn, images } : { role: "user", content: finalTurn });
   }
 
   return { system, messages };

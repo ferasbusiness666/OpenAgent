@@ -9,5 +9,8 @@ sessions/
 .DS_Store
 .env
 
+# Agent/test browser screenshots (saved into the workspace at runtime)
+screenshot_*.png
+
 # Local Claude Code settings (machine-specific; keep the shared CLAUDE.md spec)
 .claude/settings.local.json

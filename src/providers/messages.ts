@@ -18,12 +18,25 @@
  *  planner, so providers only ever see `user` / `assistant`. */
 export type ChatRole = "user" | "assistant";
 
-/** One message in the conversation. `content` is plain text today; a later
- *  phase may widen it to support image blocks for vision without changing this
- *  contract's shape for callers. */
+/** A base64-encoded image attached to a message (vision). */
+export interface ImageData {
+  /** Base64 image bytes, WITHOUT a `data:` prefix. */
+  data: string;
+  /** MIME type, e.g. "image/png". */
+  mediaType: string;
+}
+
+/**
+ * One message in the conversation. `content` is always plain text (kept a
+ * string so history/merge/CLI text paths never change). `images` is an optional
+ * vision attachment — usually only the latest user turn carries one (a
+ * screenshot the agent just took). Vision-capable providers encode these
+ * natively; text-only providers ignore them.
+ */
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  images?: ImageData[];
 }
 
 /** A single provider turn: a cacheable system prefix + the running history. */

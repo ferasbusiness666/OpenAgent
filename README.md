@@ -11,7 +11,8 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
-- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser.
+- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser (navigate / click / type / `readText` / `waitFor` / `scroll` / `press` / screenshot).
+- **Vision** — screenshots the agent takes are sent back to a vision-capable model on the next turn, so it can *see* the page and reason about it visually (on by default for API providers; toggle `enableVision` in `/settings`).
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
 - **Multi-language code execution** — the `code` tool runs **JavaScript, Python, Node, Bash, and PowerShell** in resource-limited worker threads (timeout + force-kill), confined to the workspace. JavaScript runs in an isolated in-process `vm` sandbox (safe, no FS/network; `isolated-vm` is an opt-in hardening hook via `OPENAGENT_SANDBOX=isolated-vm`); the other languages run via the local interpreter when installed and — having full system access like `shell` — are gated by the same approval prompt. JS snippets can also run several-at-once in parallel. (No Docker required; without it, isolation is process- and timeout-level, not a hardened VM.)
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
@@ -114,7 +115,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `apiKey` / `apiProvider` | API key and `"openai" \| "anthropic" \| "google" \| "groq" \| "openrouter"` (api mode). `google` is Google AI Studio (Gemini, `x-goog-api-key` header). `groq` and `openrouter` are OpenAI-compatible (`https://api.groq.com/openai/v1`, `https://openrouter.ai/api/v1`). |
 | `activeModel` | Model name/id to use (e.g. `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.0-flash`, `llama-3.3-70b-versatile`, or an OpenRouter id like `openai/gpt-4o`); blank = the provider's default. |
 | `telegramToken` / `telegramChatId` | Optional remote control via Telegram (set here, in `/settings`, or via env vars). |
-| `requireCommandApproval` | When true (default), the agent pauses for your y/n approval before running a shell command in the TUI. |
+| `requireCommandApproval` | When true (default), the agent pauses for your y/n approval before a shell command or real-interpreter `code` run in the TUI. |
+| `enableVision` | When true (default), screenshots the agent takes are sent to a vision-capable model so it can see web pages. |
 | `permSuggestEdits` / `permReadFiles` | Permission preferences from onboarding. `permSuggestEdits=false` blocks file writes/deletes; `permReadFiles` is informational (reads are always allowed). |
 | `onboardingCompleted` | Whether the first-run walkthrough has been completed/skipped. Set false (or run `/onboarding`) to replay it. |
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |

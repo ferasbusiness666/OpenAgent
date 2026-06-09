@@ -14,10 +14,14 @@ import type { GenerateRequest } from "./messages.js";
  */
 export interface Provider {
   readonly name: string;
+  /** Whether this provider can accept image content (vision). API providers are
+   *  true; CLI providers (text-only stdout) are false. The loop only attaches
+   *  screenshots when this is true and vision is enabled in config. */
+  readonly supportsVision: boolean;
   generate(request: GenerateRequest): Promise<string>;
 }
 
-export type { ChatRole, ChatMessage, GenerateRequest } from "./messages.js";
+export type { ChatRole, ChatMessage, ImageData, GenerateRequest } from "./messages.js";
 export { CLIProvider } from "./cli.js";
 export { APIProvider } from "./api.js";
 export { KNOWN_CLIS, detectClis } from "./detector.js";

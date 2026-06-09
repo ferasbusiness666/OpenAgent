@@ -35,7 +35,11 @@ export type BrowserOperation =
   | "type"
   | "screenshot"
   | "extractText"
-  | "getHtml";
+  | "getHtml"
+  | "waitFor"
+  | "scroll"
+  | "readText"
+  | "press";
 
 /** Validated parameter shape for the browser tool. */
 export interface BrowserParams {
@@ -43,6 +47,12 @@ export interface BrowserParams {
   url?: string;
   selector?: string;
   text?: string;
+  /** Key name for the "press" operation (e.g. "Enter", "Escape", "ArrowDown"). */
+  key?: string;
+  /** Scroll target for the "scroll" operation: "bottom" | "top" | "down" | "up". */
+  target?: string;
+  /** Timeout in milliseconds for the "waitFor" operation. */
+  timeout?: number;
 }
 
 /** Uniform result returned for every tool invocation. */
@@ -193,6 +203,10 @@ const BROWSER_OPS: readonly BrowserOperation[] = [
   "screenshot",
   "extractText",
   "getHtml",
+  "waitFor",
+  "scroll",
+  "readText",
+  "press",
 ];
 
 function parseBrowserParams(
@@ -211,6 +225,12 @@ function parseBrowserParams(
   if (selector !== null) result.selector = selector;
   const text = asString(params.text);
   if (text !== null) result.text = text;
+  const key = asString(params.key);
+  if (key !== null) result.key = key;
+  const target = asString(params.target);
+  if (target !== null) result.target = target;
+  const timeout = asNumber(params.timeout);
+  if (timeout !== null) result.timeout = timeout;
 
   if (op === "navigate" && result.url === undefined) {
     return 'browser "navigate" requires a string "url" parameter.';
@@ -220,6 +240,22 @@ function parseBrowserParams(
   }
   if (op === "type" && result.text === undefined) {
     return 'browser "type" requires a string "text" parameter.';
+  }
+  if (op === "waitFor" && result.selector === undefined) {
+    return 'browser "waitFor" requires a string "selector" parameter.';
+  }
+  if (op === "press" && (result.key === undefined || result.key.trim().length === 0)) {
+    return 'browser "press" requires a non-empty string "key" parameter.';
+  }
+  // "scroll" defaults target to "bottom" if omitted or unrecognised.
+  if (op === "scroll") {
+    const validScrollTargets = ["bottom", "top", "down", "up"] as const;
+    if (
+      result.target === undefined ||
+      !(validScrollTargets as readonly string[]).includes(result.target)
+    ) {
+      result.target = "bottom";
+    }
   }
   return result;
 }
@@ -430,6 +466,17 @@ async function dispatchBrowser(p: BrowserParams): Promise<string> {
       return await b.extractText();
     case "getHtml":
       return await b.getHtml();
+    case "waitFor":
+      // selector presence guaranteed by parseBrowserParams.
+      return await b.waitFor(p.selector as string, p.timeout);
+    case "scroll":
+      // target is always set (defaulted to "bottom") by parseBrowserParams.
+      return await b.scroll(p.target as string);
+    case "readText":
+      return await b.readText();
+    case "press":
+      // key presence guaranteed by parseBrowserParams.
+      return await b.press(p.key as string);
   }
 }
 

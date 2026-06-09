@@ -165,6 +165,10 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
         if (value !== "true" && value !== "false") return { error: "requireCommandApproval must be 'true' or 'false'." };
         partial.requireCommandApproval = value === "true";
         break;
+      case "enableVision":
+        if (value !== "true" && value !== "false") return { error: "enableVision must be 'true' or 'false'." };
+        partial.enableVision = value === "true";
+        break;
       default:
         // Ignore unknown keys.
         break;
@@ -1290,7 +1294,7 @@ function ToolsPanel({ browserAvailable }: ToolsPanelProps) {
     {
       name: "browser",
       detail: browserAvailable
-        ? "navigate / click / type / screenshot / extractText / getHtml (headless Chromium)"
+        ? "navigate / click / type / screenshot (vision) / readText / waitFor / scroll / press (headless Chromium)"
         : "unavailable — run npx playwright install chromium to enable",
     },
     {

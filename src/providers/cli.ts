@@ -125,6 +125,7 @@ function buildArgs(cli: string, prompt: string, model: string): string[] {
  * Nothing here throws — every failure mode is converted into a readable result.
  */
 export class CLIProvider implements Provider {
+  readonly supportsVision = false;
   private readonly cliName: string;
   private readonly model: string;
 
@@ -141,7 +142,11 @@ export class CLIProvider implements Provider {
     const parts: string[] = [request.system];
     for (const m of request.messages) {
       const label = m.role === "assistant" ? "ASSISTANT" : "USER";
-      parts.push(`${label}:\n${m.content}`);
+      let content = m.content;
+      if (Array.isArray(m.images) && m.images.length > 0) {
+        content += "\n[screenshot attached — not visible in text-CLI mode]";
+      }
+      parts.push(`${label}:\n${content}`);
     }
     return parts.join("\n\n");
   }

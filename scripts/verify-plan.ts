@@ -17,6 +17,7 @@ import { setActiveWorkspace } from "../src/config/index.js";
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-plan";
+  readonly supportsVision = false;
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */

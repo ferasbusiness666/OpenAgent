@@ -164,6 +164,87 @@ export class BrowserTool {
     });
   }
 
+  /**
+   * Wait for a CSS selector to appear in the DOM. Returns a confirmation
+   * string on success; throws an Error if the selector does not appear within
+   * the given timeout so the registry can surface a clear failure message.
+   */
+  async waitFor(selector: string, timeoutMs = 10_000): Promise<string> {
+    if (typeof selector !== "string" || selector.trim().length === 0) {
+      throw new Error("waitFor requires a non-empty selector.");
+    }
+    return await this.withRetry("waitFor", async (page) => {
+      await page.waitForSelector(selector, { timeout: timeoutMs });
+      return `Element "${selector}" appeared.`;
+    });
+  }
+
+  /**
+   * Scroll the page. `target` is one of "bottom" | "top" | "down" | "up".
+   * "bottom" scrolls to the document end, "top" scrolls to 0, "down"/"up"
+   * scroll by approximately one viewport height.
+   */
+  async scroll(target: string): Promise<string> {
+    const validTargets = ["bottom", "top", "down", "up"] as const;
+    type ScrollTarget = (typeof validTargets)[number];
+    const t: ScrollTarget = (validTargets as readonly string[]).includes(target)
+      ? (target as ScrollTarget)
+      : "bottom";
+
+    return await this.withRetry("scroll", async (page) => {
+      await page.evaluate((scrollTarget: string) => {
+        if (scrollTarget === "bottom") {
+          window.scrollTo(0, document.body.scrollHeight);
+        } else if (scrollTarget === "top") {
+          window.scrollTo(0, 0);
+        } else if (scrollTarget === "down") {
+          window.scrollBy(0, window.innerHeight);
+        } else {
+          // "up"
+          window.scrollBy(0, -window.innerHeight);
+        }
+      }, t);
+      return `Scrolled ${t}.`;
+    });
+  }
+
+  /**
+   * Extract the main readable text from the page, preferring <main> or
+   * <article> elements over the full body. Strips excessive blank lines and
+   * caps output at ~8000 characters.
+   */
+  async readText(): Promise<string> {
+    return await this.withRetry("readText", async (page) => {
+      const raw = await page.evaluate((): string => {
+        const preferred =
+          document.querySelector("main") ?? document.querySelector("article");
+        const el = preferred ?? document.body;
+        return (el as HTMLElement).innerText ?? "";
+      });
+      const text = typeof raw === "string" ? raw : "";
+      // Collapse runs of 3+ blank lines down to two.
+      const cleaned = text.replace(/(\r?\n){3,}/g, "\n\n").trim();
+      const cap = 8_000;
+      if (cleaned.length <= cap) return cleaned;
+      return cleaned.slice(0, cap) + "\n... (text truncated at 8000 chars)";
+    });
+  }
+
+  /**
+   * Simulate pressing a keyboard key (e.g. "Enter", "Escape", "ArrowDown").
+   * Uses Playwright's `page.keyboard.press` which accepts any KeyboardEvent.key
+   * value or shorthand like "Tab", "Shift+Enter", etc.
+   */
+  async press(key: string): Promise<string> {
+    if (typeof key !== "string" || key.trim().length === 0) {
+      throw new Error("press requires a non-empty key string.");
+    }
+    return await this.withRetry("press", async (page) => {
+      await page.keyboard.press(key);
+      return `Pressed ${key}.`;
+    });
+  }
+
   /** Shut the browser down cleanly. Safe to call when nothing is open. */
   async close(): Promise<void> {
     if (this.browser !== null) {

@@ -13,6 +13,7 @@ import { getConfig, resolveWorkspacePath, setActiveWorkspace } from "../src/conf
 
 class ScriptedProvider implements Provider {
   readonly name = "scripted-test";
+  readonly supportsVision = false;
   private calls = 0;
 
   /** Compat shim: loop.ts / plan.ts still call .complete() at runtime. */
