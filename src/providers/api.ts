@@ -6,6 +6,7 @@ import type {
   GenerateResult,
   ChatMessage,
   ToolCall,
+  TokenUsage,
 } from "./messages.js";
 
 export type { ApiProviderName } from "./catalog.js";
@@ -58,8 +59,17 @@ interface AnthropicResponseBlock {
   /** Present on `tool_use` blocks — the parsed argument object. */
   input?: Record<string, unknown>;
 }
+/** Anthropic usage block. Cache writes (`cache_creation_input_tokens`) are
+ *  billed as input, so we fold them into `inputTokens`. */
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
 interface AnthropicResponse {
   content?: AnthropicResponseBlock[];
+  usage?: AnthropicUsage;
 }
 
 interface OpenAIToolCall {
@@ -69,8 +79,14 @@ interface OpenAIResponseMessage {
   content?: string;
   tool_calls?: OpenAIToolCall[];
 }
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
 interface OpenAIResponse {
   choices?: Array<{ message?: OpenAIResponseMessage }>;
+  usage?: OpenAIUsage;
 }
 
 interface GoogleFunctionCall {
@@ -81,10 +97,16 @@ interface GooglePart {
   text?: string;
   functionCall?: GoogleFunctionCall;
 }
+interface GoogleUsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  cachedContentTokenCount?: number;
+}
 interface GoogleResponse {
   candidates?: Array<{
     content?: { parts?: GooglePart[] };
   }>;
+  usageMetadata?: GoogleUsageMetadata;
 }
 
 /**
@@ -243,6 +265,36 @@ export class APIProvider implements Provider {
     }
   }
 
+  /** Treats a wire value as a token count only when it is a finite number;
+   *  returns `undefined` otherwise (wire data is untrusted). */
+  private finiteOrUndefined(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+
+  /**
+   * Builds a normalized {@link TokenUsage} from an already-extracted
+   * (input, output, cacheRead) triple, or `undefined` when neither input nor
+   * output is a finite number (i.e. the response carried no usage metadata).
+   * `cacheRead` is only attached when it is itself a finite number.
+   */
+  private buildUsage(
+    inputTokens: number | undefined,
+    outputTokens: number | undefined,
+    cacheReadTokens: number | undefined
+  ): TokenUsage | undefined {
+    if (inputTokens === undefined && outputTokens === undefined) {
+      return undefined;
+    }
+    const usage: TokenUsage = {
+      inputTokens: inputTokens ?? 0,
+      outputTokens: outputTokens ?? 0,
+    };
+    if (cacheReadTokens !== undefined) {
+      usage.cacheReadTokens = cacheReadTokens;
+    }
+    return usage;
+  }
+
   private async readJson(response: Response): Promise<unknown> {
     const text = await response.text();
     if (!response.ok) {
@@ -326,7 +378,25 @@ export class APIProvider implements Provider {
         `Anthropic response missing content text: ${JSON.stringify(data)}`
       );
     }
-    return { text, toolCalls };
+
+    // Map Anthropic usage → normalized TokenUsage. Cache writes
+    // (cache_creation_input_tokens) are billed as input, so add them to
+    // inputTokens when present.
+    const wireInput = this.finiteOrUndefined(data.usage?.input_tokens);
+    const wireCacheCreation = this.finiteOrUndefined(
+      data.usage?.cache_creation_input_tokens
+    );
+    const inputTokens =
+      wireInput === undefined && wireCacheCreation === undefined
+        ? undefined
+        : (wireInput ?? 0) + (wireCacheCreation ?? 0);
+    const usage = this.buildUsage(
+      inputTokens,
+      this.finiteOrUndefined(data.usage?.output_tokens),
+      this.finiteOrUndefined(data.usage?.cache_read_input_tokens)
+    );
+
+    return usage ? { text, toolCalls, usage } : { text, toolCalls };
   }
 
   /**
@@ -399,7 +469,15 @@ export class APIProvider implements Provider {
         name: tc.function?.name as string,
         arguments: this.safeParseJson(tc.function?.arguments ?? ""),
       }));
-    return { text, toolCalls };
+
+    // Map OpenAI-compatible usage → normalized TokenUsage.
+    const usage = this.buildUsage(
+      this.finiteOrUndefined(data.usage?.prompt_tokens),
+      this.finiteOrUndefined(data.usage?.completion_tokens),
+      this.finiteOrUndefined(data.usage?.prompt_tokens_details?.cached_tokens)
+    );
+
+    return usage ? { text, toolCalls, usage } : { text, toolCalls };
   }
 
   private async completeOpenAI(request: GenerateRequest): Promise<GenerateResult> {
@@ -491,6 +569,14 @@ export class APIProvider implements Provider {
         `Google response missing candidates[0].content.parts text: ${JSON.stringify(data)}`
       );
     }
-    return { text, toolCalls };
+
+    // Map Gemini usageMetadata → normalized TokenUsage.
+    const usage = this.buildUsage(
+      this.finiteOrUndefined(data.usageMetadata?.promptTokenCount),
+      this.finiteOrUndefined(data.usageMetadata?.candidatesTokenCount),
+      this.finiteOrUndefined(data.usageMetadata?.cachedContentTokenCount)
+    );
+
+    return usage ? { text, toolCalls, usage } : { text, toolCalls };
   }
 }

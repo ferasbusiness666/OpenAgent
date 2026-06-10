@@ -30,6 +30,8 @@ import path from "node:path";
 import { URL } from "node:url";
 import fs from "fs-extra";
 import { getActiveWorkspace } from "../config/index.js";
+import { registerLoopbackExemption } from "../util/net-guard.js";
+import { resolveWorkspaceRelative, isInsidePath } from "../util/sandbox.js";
 
 // ── Content-type table ──────────────────────────────────────────────────────
 
@@ -82,67 +84,40 @@ interface ServerEntry {
  */
 const registry = new Map<string, ServerEntry>();
 
+/**
+ * True when `url` points at one of OUR running preview servers (loopback host +
+ * a port we are listening on). Used to exempt the agent's own previews from the
+ * SSRF guard so it can still open the site it just shipped.
+ */
+export function isLocalPreviewUrl(url: URL): boolean {
+  const host = url.hostname;
+  const isLoopbackHost =
+    host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+  if (!isLoopbackHost) {
+    return false;
+  }
+  const port = url.port.length > 0 ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
+  for (const entry of registry.values()) {
+    const addr = entry.server.address();
+    if (addr !== null && typeof addr !== "string" && addr.port === port) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The browser/http SSRF guard consults this so local previews keep working.
+registerLoopbackExemption(isLocalPreviewUrl);
+
 // ── Path-validation helpers ─────────────────────────────────────────────────
 
 /**
- * Validate a workspace-relative `dir` argument, mirroring the checks in
- * `FilesystemTool.resolveSafe()`.  Returns the absolute, confirmed-directory
- * path, or throws a descriptive `Error`.
- *
- * Rules:
- *  • Must be a non-empty string.
- *  • Must NOT contain `..`.
- *  • Must NOT start with `/`, `\`, or `~`.
- *  • Must NOT be a Windows drive-letter absolute path (e.g. `C:\...`).
- *  • After resolving against the workspace root the result must remain inside
- *    the workspace (defense-in-depth against clever Unicode tricks).
- *  • The resolved path must exist and be a directory.
+ * Validate a workspace-relative `dir` argument via the SHARED sandbox util
+ * (`..`, absolute paths, `~`, and resolved escapes are all rejected there —
+ * one implementation for every tool, see src/util/sandbox.ts).
  */
 function resolveServedDir(dir: string): string {
-  const p = dir.trim();
-
-  if (p.length === 0) {
-    throw new Error("serve: dir must be a non-empty string.");
-  }
-  if (p.includes("..")) {
-    throw new Error(
-      `serve: path traversal ("..") is not allowed in dir: "${p}"`,
-    );
-  }
-  if (p.startsWith("/") || p.startsWith("\\")) {
-    throw new Error(`serve: absolute paths are not allowed in dir: "${p}"`);
-  }
-  if (p.startsWith("~")) {
-    throw new Error(
-      `serve: home-directory references are not allowed in dir: "${p}"`,
-    );
-  }
-  // Windows drive-letter absolute paths (C:\ or C:/).
-  if (/^[A-Za-z]:[\\/]/.test(p) || path.isAbsolute(p)) {
-    throw new Error(`serve: absolute paths are not allowed in dir: "${p}"`);
-  }
-
-  const workspace = path.resolve(getActiveWorkspace());
-  const resolved = path.resolve(workspace, p);
-
-  // Defense-in-depth: ensure the resolved path is still inside the workspace.
-  const rel = path.relative(workspace, resolved);
-  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new Error(
-      `serve: resolved dir escapes the workspace root: "${p}"`,
-    );
-  }
-
-  return resolved;
-}
-
-/**
- * Return true when `target` is exactly `base` or is nested inside it.
- * Works on both POSIX and Windows paths.
- */
-function isInsideDir(base: string, target: string): boolean {
-  const rel = path.relative(base, target);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return resolveWorkspaceRelative(dir, path.resolve(getActiveWorkspace()), "serve");
 }
 
 // ── Port-availability probe ──────────────────────────────────────────────────
@@ -226,7 +201,7 @@ function makeHandler(servedDir: string): http.RequestListener {
         // symlinks would require `fs.realpath` (async), but for a dev preview
         // the raw check is sufficient and keeps the handler synchronous up to
         // the stat call.
-        if (!isInsideDir(servedDir, absolute)) {
+        if (!isInsidePath(servedDir, absolute)) {
           res.writeHead(403, { "Content-Type": "text/plain" });
           res.end("Forbidden");
           return;

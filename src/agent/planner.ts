@@ -22,6 +22,7 @@ export const AgentResponseSchema = z.object({
     "code",
     "memory",
     "serve",
+    "http",
     "update_plan",
     "done",
     "stuck",
@@ -52,8 +53,14 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 1. shell — run a shell command inside the workspace.
    params: { "command": "string" }
 
-2. filesystem — read/write/list/delete/mkdir files (paths are relative to the workspace).
-   params: { "operation": "read" | "write" | "list" | "delete" | "mkdir", "path": "string", "content": "string (only for write)" }
+2. filesystem — file operations (paths are relative to the workspace).
+   params: { "operation": "read" | "write" | "list" | "delete" | "mkdir" | "grep" | "find" | "diff",
+             "path": "string (grep/find: dir or file to search, default workspace root; diff: the FIRST file)",
+             "content": "string (only for write)",
+             "pattern": "grep: regex to search file contents; find: file-name glob like *.ts",
+             "pathB": "diff: the SECOND file",
+             "recursive": boolean (grep/find, default true), "caseInsensitive": boolean (grep, default false) }
+   Use grep to search inside files, find to locate files by name, diff to compare two files — much cheaper than reading whole files.
 
 3. browser — drive a headless Chromium browser.
    params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "readText" | "getHtml" | "waitFor" | "scroll" | "press",
@@ -81,13 +88,17 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 8. serve — host a workspace directory over HTTP on localhost and return the URL (local preview).
    params: { "dir": "workspace-relative dir (optional, default the workspace root)", "port": number (optional) }
 
-9. update_plan — report progress on a phase (alternative to the "progress" field).
+9. http — make an HTTP request and read the response (use this instead of curl). Private/internal addresses are blocked.
+   params: { "method": "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" (default GET), "url": "absolute http(s) URL",
+             "headers": { "name": "value" } (optional), "body": "string (POST/PUT/PATCH)", "timeoutMs": number (optional) }
+
+10. update_plan — report progress on a phase (alternative to the "progress" field).
    params: { "phase": number, "status": "in_progress" | "completed" | "failed", "finding": "short note (optional)" }
 
-10. done — the task is fully complete. Put the final answer to the user in "message".
+11. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-11. stuck — you cannot proceed without the user. Explain what you need in "message".
+12. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -105,7 +116,7 @@ export interface SystemPromptOptions {
  */
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
   return `You are Open Agent, an autonomous AI agent that executes tasks end-to-end on the user's machine.
-You plan, act with real tools (shell, filesystem, browser, github, research, code, memory), observe the results, and self-correct on failure.
+You plan, act with real tools (shell, filesystem, browser, github, research, code, memory, http, serve), observe the results, and self-correct on failure.
 You work until the task is fully done. You do NOT stop to ask questions unless you are completely stuck.
 
 # Persistent memory (AGENT.md)
@@ -124,7 +135,7 @@ If you have been given tools (function calling), CALL exactly one tool per step 
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
-  "action": "shell | filesystem | browser | github | research | code | memory | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | done | stuck",
   "params": { ... },
   "message": "what to show the user (optional)",
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }

@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import path from "node:path";
 import fs from "fs-extra";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
+import { isInsidePath } from "../util/sandbox.js";
 
 /** Result of running a shell command. */
 export interface ShellResult {
@@ -81,7 +82,7 @@ function escapesWorkspace(command: string, workspace: string): boolean {
         continue;
       }
       const resolved = path.resolve(candidate);
-      if (!isInside(normalizedWorkspace, resolved)) {
+      if (!isInsidePath(normalizedWorkspace, resolved)) {
         return true;
       }
     }
@@ -92,19 +93,13 @@ function escapesWorkspace(command: string, workspace: string): boolean {
   if (winAbsolute) {
     for (const candidate of winAbsolute) {
       const resolved = path.resolve(candidate);
-      if (!isInside(normalizedWorkspace, resolved)) {
+      if (!isInsidePath(normalizedWorkspace, resolved)) {
         return true;
       }
     }
   }
 
   return false;
-}
-
-/** True when `target` is the workspace root or a path nested inside it. */
-function isInside(workspace: string, target: string): boolean {
-  const rel = path.relative(workspace, target);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 /**

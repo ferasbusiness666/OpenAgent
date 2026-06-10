@@ -11,7 +11,10 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
-- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked), and a reusable headless Chromium browser (navigate / click / type / `readText` / `waitFor` / `scroll` / `press` / screenshot).
+- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked, with `grep` / `find` / `diff` for cheap code search and comparison), a dedicated `http` client (no more fragile curl-via-shell), and a reusable headless Chromium browser (navigate / click / type / `readText` / `waitFor` / `scroll` / `press` / screenshot).
+- **Token & cost tracking** — every API call's token usage is parsed and accumulated; the status bar shows live `in / out` tokens and the estimated cost (amber past $0.10, red past $1.00). Cap a session with `--budget <usd>` or the `budgetUsd` setting — the agent stops *before* exceeding it.
+- **SSRF protection** — the browser and http tools resolve every URL and block loopback, RFC-1918, and link-local/metadata addresses (DNS-checked, not just literal IPs). The agent's own `serve` previews on localhost stay exempt, and `allowLocalNetworkAccess` opts back in for LAN automation.
+- **Audit log** — every tool execution (operation + path/command, never file contents or secrets) is appended to `~/.openagent/audit.log` as JSONL, so you can review exactly what the agent did after any run.
 - **Vision** — screenshots the agent takes are sent back to a vision-capable model on the next turn, so it can *see* the page and reason about it visually (on by default for API providers; toggle `enableVision` in `/settings`).
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
 - **Multi-language code execution** — the `code` tool runs **JavaScript, Python, Node, Bash, and PowerShell** in resource-limited worker threads (timeout + force-kill), confined to the workspace. JavaScript runs in an isolated in-process `vm` sandbox (safe, no FS/network; `isolated-vm` is an opt-in hardening hook via `OPENAGENT_SANDBOX=isolated-vm`); the other languages run via the local interpreter when installed and — having full system access like `shell` — are gated by the same approval prompt. JS snippets can also run several-at-once in parallel. (No Docker required; without it, isolation is process- and timeout-level, not a hardened VM.)
@@ -104,6 +107,7 @@ All persistent data lives under `~/.openagent/` in your home directory — never
   AGENT.md           global persistent memory
   projects.json      registry of known projects
   schedules.json     local scheduling store (polled in-process)
+  audit.log          JSONL audit trail of every tool execution
   runs/              background-run records + JSONL event logs
   memory/            long-term memory notes (one Markdown file each)
   sessions/<projectId>/<timestamp>.json
@@ -125,6 +129,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `permSuggestEdits` / `permReadFiles` | Permission preferences from onboarding. `permSuggestEdits=false` blocks file writes/deletes; `permReadFiles` is informational (reads are always allowed). |
 | `onboardingCompleted` | Whether the first-run walkthrough has been completed/skipped. Set false (or run `/onboarding`) to replay it. |
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |
+| `allowLocalNetworkAccess` | When true, the browser/http tools may reach localhost and private LAN addresses (the SSRF guard is off). Default false; the agent's own `serve` previews are always allowed. |
+| `budgetUsd` | Stop the agent when the estimated session cost reaches this many USD (`0`, the default, disables the limit). The `--budget <usd>` CLI flag overrides it for one run without persisting. |
 
 You can edit all of these live from inside the app with `/settings`. Values are **validated before they are saved** — an invalid value is rejected and not written:
 
@@ -168,7 +174,7 @@ In a non-TTY environment the UI falls back to plain console output.
 
 On startup the agent merges two memory files into its system prompt: `~/.openagent/AGENT.md` (global memory — preferences and general info about you) and `<cwd>/AGENT.md` (project-specific memory). Either is created from a template if it is missing.
 
-Each turn the agent is sent a **stable, cacheable system prefix** (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the response-format rules) plus the running history as a **role-tagged message array**. Volatile content — the current time and the recited plan — is appended to the most recent user message, never to the system prefix. Keeping that prefix byte-for-byte stable lets each backend reuse its **prompt cache** (Anthropic `cache_control`, OpenAI/Groq automatic prefix caching, Gemini `systemInstruction`), which cuts latency and cost on long runs; reciting the plan in the recent turn keeps the goal in attention. The action set (shell/filesystem/browser/github/research/code/memory/serve plus done/stuck/update_plan) is offered to API providers as **native tools**, so the agent returns a structured tool call; CLI/text providers instead reply with a single JSON object:
+Each turn the agent is sent a **stable, cacheable system prefix** (its identity + the merged `AGENT.md` memory + the tool reference + the working directory + the response-format rules) plus the running history as a **role-tagged message array**. Volatile content — the current time and the recited plan — is appended to the most recent user message, never to the system prefix. Keeping that prefix byte-for-byte stable lets each backend reuse its **prompt cache** (Anthropic `cache_control`, OpenAI/Groq automatic prefix caching, Gemini `systemInstruction`), which cuts latency and cost on long runs; reciting the plan in the recent turn keeps the goal in attention. The action set (shell/filesystem/browser/github/research/code/memory/serve/http plus done/stuck/update_plan) is offered to API providers as **native tools**, so the agent returns a structured tool call; CLI/text providers instead reply with a single JSON object:
 
 ```json
 {
@@ -200,6 +206,9 @@ Sessions are capped at 500 messages. When the cap is reached the full transcript
 
 - The agent's working directory is the directory it was launched in. Shell and filesystem operations are confined to it; path traversal (`..`, absolute paths, `~`) is blocked. The trust prompt at launch is the gate for operating in that directory.
 - Dangerous shell commands (`rm -rf /`, `format`, `mkfs`, fork bombs, …) are refused.
+- One shared path-confinement implementation (`src/util/sandbox.ts`) is used by the shell, filesystem, and serve tools, so the traversal rules can never drift apart.
+- Outbound URLs (browser + http tools) are DNS-resolved and checked against loopback / RFC-1918 / link-local + metadata ranges before any connection is made (SSRF guard); `file://` is never dialed.
+- Every tool execution is appended to `~/.openagent/audit.log` (operation + path/command only — never file contents, request bodies, or anything matching token/key/secret/password, which are redacted).
 - `config.json` lives in `~/.openagent/` and is never committed; API keys and Telegram tokens are never logged.
 - The Telegram bridge only accepts commands from the configured chat ID.
 
@@ -213,14 +222,18 @@ src/
   agent/     loop (hot-swappable provider), planner, plan (multi-phase),
              run-store + runner (detached background runs),
              corrector (self-healing exponential back-off)
-  tools/     shell (cross-platform), filesystem, browser, research,
-             code (multi-language), serve (local preview), registry
-  agent/     ... + tool-schemas (native function-calling definitions)
+  tools/     shell (cross-platform), filesystem (incl. grep/find/diff), browser,
+             research, code (multi-language), serve (local preview),
+             http (SSRF-guarded client), registry
+  agent/     ... + tool-schemas (native function-calling definitions),
+             usage (token/cost tracking + budget)
   eval/      eval-harness tasks (scripts/eval.ts runs them)
   workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
   scheduler/ file-based scheduler + types
   connectors/ github (read + PR/issue write), registry, types
-  providers/ detector, cli, api, factory, catalog (API provider metadata)
+  providers/ detector, cli (table-driven invocations), api, factory,
+             catalog (API provider metadata), mock (mock/recording/replay
+             providers for offline testing)
   memory/    session (in-memory + disk persistence),
              session-store (session file paths/serialization),
              session-manager (resumable AgentState), longterm (BM25 memory),
@@ -228,7 +241,10 @@ src/
   ui/        + WorkerPanel (parallel-worker visualization), Onboarding (7-step first-run flow)
   telegram/  remote-control bridge
   config/    zod-validated config, validate (live settings validation)
-  util/      json (extract/parse JSON from noisy output)
+  util/      json (extract/parse JSON from noisy output),
+             sandbox (the single workspace path-confinement impl),
+             net-guard (SSRF protection for browser/http)
+  audit.ts   JSONL audit log of every tool execution
   paths.ts   ~/.openagent locations + legacy migration
   startup.ts trust prompt → project detection → first-run wizard
   setup.ts   first-run provider wizard

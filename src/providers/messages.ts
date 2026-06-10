@@ -54,6 +54,18 @@ export interface ToolCall {
 }
 
 /**
+ * Token usage reported by an API provider for one call. Field names are
+ * normalized across providers (Anthropic input/output_tokens, OpenAI
+ * prompt/completion_tokens, Gemini promptTokenCount/candidatesTokenCount).
+ */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Tokens served from the provider's prompt cache (when reported). */
+  cacheReadTokens?: number;
+}
+
+/**
  * Structured model output: any free text the model produced plus the tool calls
  * it made (empty when it just replied with text — e.g. planning/reflection,
  * which pass no tools). Native function-calling fills `toolCalls` directly; the
@@ -62,6 +74,9 @@ export interface ToolCall {
 export interface GenerateResult {
   text: string;
   toolCalls: ToolCall[];
+  /** Per-call token usage. API providers fill this from the response's usage
+   *  metadata; absent for CLI providers, which report nothing. */
+  usage?: TokenUsage;
 }
 
 /** A single provider turn: a cacheable system prefix + the running history. */

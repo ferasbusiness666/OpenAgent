@@ -33,6 +33,7 @@ import {
 } from "./commands.js";
 import { ChatView } from "./ChatView.js";
 import { StatusBar } from "./StatusBar.js";
+import type { SessionUsage } from "../agent/usage.js";
 import { CommandMenu } from "./CommandMenu.js";
 import { ProjectSelector } from "./ProjectSelector.js";
 import { SettingsScreen } from "./SettingsScreen.js";
@@ -173,6 +174,16 @@ function buildPartial(raw: Record<string, string>): Partial<Config> | { error: s
         if (value !== "true" && value !== "false") return { error: "enableReflection must be 'true' or 'false'." };
         partial.enableReflection = value === "true";
         break;
+      case "allowLocalNetworkAccess":
+        if (value !== "true" && value !== "false") return { error: "allowLocalNetworkAccess must be 'true' or 'false'." };
+        partial.allowLocalNetworkAccess = value === "true";
+        break;
+      case "budgetUsd": {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return { error: "budgetUsd must be a number ≥ 0 (0 disables the budget)." };
+        partial.budgetUsd = n;
+        break;
+      }
       default:
         // Ignore unknown keys.
         break;
@@ -304,6 +315,8 @@ export function App({
   const [phases, setPhases] = useState<Phase[]>(() => agentLoop.plan);
   // Live snapshot of the parallel worker pool (Phase 4 visualization).
   const [workers, setWorkers] = useState<WorkerStatus[]>([]);
+  // Running session token/cost totals (fed by the loop's "usage" events).
+  const [usage, setUsage] = useState<SessionUsage>(() => agentLoop.sessionUsage);
   // Pending shell-command approval request (onboarding Step 6 "stay in control").
   const [approval, setApproval] = useState<{ summary: string; resolve: (ok: boolean) => void } | null>(null);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
@@ -504,7 +517,9 @@ export function App({
     };
     const onPlan = (next: Phase[]) => setPhases(next);
     const onPhaseUpdate = (next: Phase[]) => setPhases(next);
+    const onUsage = (totals: SessionUsage) => setUsage(totals);
 
+    agentLoop.on("usage", onUsage);
     agentLoop.on("thought", onThought);
     agentLoop.on("toolCall", onToolCall);
     agentLoop.on("toolResult", onToolResult);
@@ -516,6 +531,7 @@ export function App({
     agentLoop.on("phaseUpdate", onPhaseUpdate);
 
     return () => {
+      agentLoop.off("usage", onUsage);
       agentLoop.off("thought", onThought);
       agentLoop.off("toolCall", onToolCall);
       agentLoop.off("toolResult", onToolResult);
@@ -1148,6 +1164,7 @@ export function App({
         providerName={activeProviderName}
         workspacePath={activeWorkspace}
         projectName={currentProject?.name}
+        usage={usage}
       />
     </Box>
   );

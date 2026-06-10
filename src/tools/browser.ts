@@ -3,6 +3,7 @@ import fs from "fs-extra";
 import { chromium } from "playwright";
 import type { Browser, Page } from "playwright";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
+import { checkUrlAllowed } from "../util/net-guard.js";
 
 // Cached result of the chromium-binary check (the path never changes at runtime).
 let browserAvailableCache: boolean | null = null;
@@ -98,13 +99,34 @@ export class BrowserTool {
     }
   }
 
-  /** Navigate to a URL and return the resulting page title. */
+  /**
+   * Navigate to a URL and return the resulting page title. URLs are screened
+   * by the SSRF guard before AND after navigation (redirects could land on an
+   * internal address even when the requested URL was public); the agent's own
+   * `serve` previews on localhost are exempt, and the user can disable the
+   * guard with the `allowLocalNetworkAccess` setting.
+   */
   async navigate(url: string): Promise<string> {
     if (typeof url !== "string" || url.trim().length === 0) {
       throw new Error("navigate requires a non-empty url.");
     }
+    const allowLocal = getConfig().allowLocalNetworkAccess;
+    const check = await checkUrlAllowed(url, { allowLocal });
+    if (!check.allowed) {
+      throw new Error(check.reason ?? `Blocked URL: ${url}`);
+    }
     return await this.withRetry("navigate", async (page) => {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      const finalUrl = page.url();
+      if (finalUrl !== url) {
+        const post = await checkUrlAllowed(finalUrl, { allowLocal });
+        if (!post.allowed) {
+          await page.goto("about:blank");
+          throw new Error(
+            `Blocked: the page redirected to an internal address (${finalUrl}). ${post.reason ?? ""}`,
+          );
+        }
+      }
       const title = await page.title();
       return `Navigated to ${url} — title: "${title}"`;
     });

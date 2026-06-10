@@ -5,9 +5,11 @@ import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
 import { CodeTool, SUPPORTED_LANGUAGES, type CodeLanguage } from "./code.js";
 import { ServeTool } from "./serve.js";
+import { HttpTool, type HttpMethod, type HttpRequestOptions } from "./http.js";
 import { ResearchTool } from "./research.js";
 import { LongTermMemory, type RecallHit } from "../memory/longterm.js";
 import { getConnector } from "../connectors/index.js";
+import { appendAuditEntry } from "../audit.js";
 
 export { ShellTool } from "./shell.js";
 export type { ShellResult } from "./shell.js";
@@ -29,6 +31,14 @@ export interface FilesystemParams {
   operation: FilesystemOperation;
   path: string;
   content?: string;
+  /** grep: content regex; find: file-name glob (e.g. "*.ts"). */
+  pattern?: string;
+  /** diff: the second file to compare against. */
+  pathB?: string;
+  /** grep/find: descend into subdirectories (default true). */
+  recursive?: boolean;
+  /** grep: case-insensitive matching (default false). */
+  caseInsensitive?: boolean;
 }
 
 /** Browser operations the registry can dispatch. */
@@ -75,6 +85,7 @@ class ToolRegistry {
   readonly browser = new BrowserTool();
   readonly code = new CodeTool();
   readonly serve = new ServeTool();
+  readonly http = new HttpTool();
   readonly research = new ResearchTool();
   readonly memory = new LongTermMemory();
 }
@@ -116,6 +127,7 @@ const TOOL_NAMES = [
   "code",
   "memory",
   "serve",
+  "http",
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -172,6 +184,16 @@ const FILESYSTEM_OPS: readonly FilesystemOperation[] = [
   "list",
   "delete",
   "mkdir",
+  "grep",
+  "find",
+  "diff",
+];
+
+/** Operations that tolerate a missing/empty path (default: workspace root). */
+const FILESYSTEM_OPS_OPTIONAL_PATH: readonly FilesystemOperation[] = [
+  "list",
+  "grep",
+  "find",
 ];
 
 function parseFilesystemParams(
@@ -183,9 +205,11 @@ function parseFilesystemParams(
   }
   const op = operation as FilesystemOperation;
 
-  // "list" tolerates a missing/empty path (defaults to workspace root).
   const rawPath = asString(params.path);
-  if (op !== "list" && (rawPath === null || rawPath.trim().length === 0)) {
+  if (
+    !(FILESYSTEM_OPS_OPTIONAL_PATH as readonly string[]).includes(op) &&
+    (rawPath === null || rawPath.trim().length === 0)
+  ) {
     return `filesystem "${op}" requires a non-empty string "path" parameter.`;
   }
   const fsPath = rawPath ?? "";
@@ -196,6 +220,29 @@ function parseFilesystemParams(
       return 'filesystem "write" requires a string "content" parameter.';
     }
     return { operation: op, path: fsPath, content };
+  }
+
+  if (op === "grep" || op === "find") {
+    const pattern = asString(params.pattern);
+    if (pattern === null || pattern.trim().length === 0) {
+      return op === "grep"
+        ? 'filesystem "grep" requires a non-empty string "pattern" parameter (a regex to search file contents for).'
+        : 'filesystem "find" requires a non-empty string "pattern" parameter (a file-name glob like "*.ts").';
+    }
+    const out: FilesystemParams = { operation: op, path: fsPath, pattern };
+    const recursive = asBoolean(params.recursive);
+    if (recursive !== null) out.recursive = recursive;
+    const caseInsensitive = asBoolean(params.caseInsensitive);
+    if (caseInsensitive !== null) out.caseInsensitive = caseInsensitive;
+    return out;
+  }
+
+  if (op === "diff") {
+    const pathB = asString(params.pathB);
+    if (pathB === null || pathB.trim().length === 0) {
+      return 'filesystem "diff" requires a non-empty string "pathB" parameter (the second file to compare).';
+    }
+    return { operation: op, path: fsPath, pathB };
   }
 
   return { operation: op, path: fsPath };
@@ -415,6 +462,46 @@ function parseServeParams(params: Record<string, unknown>): ServeParams | string
   return out;
 }
 
+const HTTP_METHODS: readonly HttpMethod[] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
+
+/** Read a string→string header map from an unknown value (non-strings dropped). */
+function asHeaderMap(value: unknown): Record<string, string> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string") {
+      out[k] = v;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function parseHttpParams(params: Record<string, unknown>): HttpRequestOptions | string {
+  const url = asString(params.url);
+  if (url === null || url.trim().length === 0) {
+    return 'http requires a non-empty string "url" parameter.';
+  }
+  const out: HttpRequestOptions = { url: url.trim() };
+
+  const rawMethod = asString(params.method);
+  if (rawMethod !== null) {
+    const method = rawMethod.toUpperCase();
+    if (!(HTTP_METHODS as readonly string[]).includes(method)) {
+      return `http "method" must be one of: ${HTTP_METHODS.join(", ")}.`;
+    }
+    out.method = method as HttpMethod;
+  }
+  const headers = asHeaderMap(params.headers);
+  if (headers !== null) out.headers = headers;
+  const body = asString(params.body);
+  if (body !== null) out.body = body;
+  const timeoutMs = asNumber(params.timeoutMs);
+  if (timeoutMs !== null) out.timeoutMs = timeoutMs;
+  return out;
+}
+
 /** Validated parameter shape for the memory tool. */
 export interface MemoryParams {
   operation: "remember" | "recall";
@@ -513,6 +600,14 @@ async function dispatchFilesystem(p: FilesystemParams): Promise<string> {
       return await f.delete(p.path);
     case "mkdir":
       return await f.mkdir(p.path);
+    case "grep":
+      // pattern presence guaranteed by parseFilesystemParams.
+      return await f.grep(p.pattern ?? "", p.path, p.recursive ?? true, p.caseInsensitive ?? false);
+    case "find":
+      return await f.find(p.pattern ?? "", p.path, p.recursive ?? true);
+    case "diff":
+      // pathB presence guaranteed by parseFilesystemParams.
+      return await f.diff(p.path, p.pathB ?? "");
   }
 }
 
@@ -520,8 +615,28 @@ async function dispatchFilesystem(p: FilesystemParams): Promise<string> {
  * Execute a tool by name with arbitrary (untrusted) params. Validates and
  * narrows the params, dispatches to the matching tool, and translates any
  * thrown error into a structured failure result. Never throws.
+ *
+ * Every invocation is appended to the persistent audit log (~/.openagent/
+ * audit.log, JSONL) with sanitized params — operation type and path/command
+ * only, never file contents or secrets — so the user can review exactly what
+ * the agent did after any run.
  */
 export async function executeTool(
+  name: string,
+  params: Record<string, unknown>,
+): Promise<ToolResult> {
+  const safeParams = params !== null && typeof params === "object" ? params : {};
+  const result = await executeToolInner(name, safeParams);
+  appendAuditEntry(
+    name,
+    safeParams,
+    result.success,
+    result.success ? result.result : result.error ?? "Unknown error",
+  );
+  return result;
+}
+
+async function executeToolInner(
   name: string,
   params: Record<string, unknown>,
 ): Promise<ToolResult> {
@@ -616,6 +731,15 @@ export async function executeTool(
         return { success: false, result: "", error: parsed };
       }
       const result = await registry.serve.serve(parsed.dir, parsed.port);
+      return { success: true, result };
+    }
+
+    if (name === "http") {
+      const parsed = parseHttpParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const result = await registry.http.request(parsed);
       return { success: true, result };
     }
 

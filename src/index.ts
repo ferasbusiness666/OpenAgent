@@ -48,6 +48,7 @@ interface CliOptions {
   resume?: string;
   background?: string;
   runDetached?: string;
+  budget?: string;
 }
 
 /** Attach plain-text console listeners to the loop (headless / fallback mode). */
@@ -90,9 +91,25 @@ async function main(): Promise<void> {
       "--run-detached <runId>",
       "internal: execute a registered background run (used by --background)",
     )
+    .option(
+      "--budget <usd>",
+      "stop the agent before the estimated session cost exceeds this many USD (this run only)",
+    )
     .allowExcessArguments(true);
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
+
+  // Session-only budget override: routed through the environment so getConfig()
+  // stays the single source of truth without persisting the flag to config.json.
+  if (options.budget !== undefined) {
+    const budget = Number(options.budget);
+    if (Number.isFinite(budget) && budget >= 0) {
+      process.env.OPENAGENT_BUDGET_USD = String(budget);
+    } else {
+      console.error(chalk.red(`Invalid --budget value: "${options.budget}" (expected a number of USD).`));
+      process.exit(1);
+    }
+  }
 
   // Move any legacy data into ~/.openagent/ up front. Pruning of stale sessions
   // is deferred until AFTER the resume target is loaded (below), so resuming an

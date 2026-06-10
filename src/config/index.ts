@@ -44,6 +44,13 @@ export const ConfigSchema = z.object({
   // Self-critique: when true, before accepting "done" the agent reviews the work
   // against the goal and keeps going if it isn't actually complete.
   enableReflection: z.boolean().default(true),
+  // SSRF guard override: when true, the browser/http tools may dial loopback,
+  // RFC-1918, and link-local addresses (for users automating their own LAN).
+  // Off by default; the agent's own `serve` previews are always exempt.
+  allowLocalNetworkAccess: z.boolean().default(false),
+  // Spending limit (estimated USD) per session; the loop stops with "stuck"
+  // before exceeding it. 0 disables budget enforcement.
+  budgetUsd: z.number().min(0).default(0),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -119,6 +126,14 @@ function applyEnvOverrides(config: Config): Config {
   }
   if (tavily && tavily.trim().length > 0) {
     result.tavilyApiKey = tavily.trim();
+  }
+  // Session-only budget set by the --budget CLI flag (never persisted).
+  const budget = process.env.OPENAGENT_BUDGET_USD;
+  if (budget && budget.trim().length > 0) {
+    const n = Number(budget);
+    if (Number.isFinite(n) && n >= 0) {
+      result.budgetUsd = n;
+    }
   }
   return result;
 }

@@ -36,6 +36,8 @@ const FIELDS: Field[] = [
   { key: "enableReflection", label: "Self-check before done", type: "enum", options: ["true", "false"] },
   { key: "permSuggestEdits", label: "Allow file edits", type: "enum", options: ["true", "false"] },
   { key: "permReadFiles", label: "Allow reading files", type: "enum", options: ["true", "false"] },
+  { key: "allowLocalNetworkAccess", label: "Allow local-network URLs", type: "enum", options: ["true", "false"] },
+  { key: "budgetUsd", label: "Session budget (USD)", type: "text" },
   { key: "onboardingCompleted", label: "Onboarding completed", type: "enum", options: ["true", "false"] },
 ];
 
@@ -76,6 +78,10 @@ function helpFor(field: Field, detected: string[]): string {
       return "when false, the agent cannot write/delete/mkdir files (it can still read)";
     case "permReadFiles":
       return "informational; the agent always needs to read the workspace to be useful";
+    case "allowLocalNetworkAccess":
+      return "when true, the browser/http tools may reach localhost and private LAN addresses (SSRF guard off)";
+    case "budgetUsd":
+      return "stop the agent when the estimated session cost reaches this many USD; 0 = no limit";
     case "onboardingCompleted":
       return "set to false (or run /onboarding) to replay the first-run walkthrough";
     default:

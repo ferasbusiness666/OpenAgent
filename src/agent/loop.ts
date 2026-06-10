@@ -17,6 +17,7 @@ import {
 import { Planner, type Phase } from "./plan.js";
 import { SessionManager, type AgentState } from "../memory/session-manager.js";
 import { Corrector } from "./corrector.js";
+import { UsageTracker, type SessionUsage } from "./usage.js";
 import { extractJsonObject } from "../util/json.js";
 import { randomUUID } from "node:crypto";
 
@@ -37,6 +38,7 @@ const TOOL_ACTIONS = [
   "code",
   "memory",
   "serve",
+  "http",
 ] as const;
 type ToolAction = (typeof TOOL_ACTIONS)[number];
 
@@ -57,6 +59,9 @@ export interface AgentEvents {
   plan: (phases: Phase[]) => void;
   /** Emitted whenever a phase's status or findings change. */
   phaseUpdate: (phases: Phase[]) => void;
+  /** Emitted after each provider call that reported token usage, with the
+   *  session's running totals (tokens + estimated cost). */
+  usage: (totals: SessionUsage) => void;
 }
 
 /** Optional collaborators and resume state for an AgentLoop. */
@@ -110,6 +115,9 @@ export class AgentLoop extends EventEmitter {
   // Screenshots captured this turn, attached to the NEXT provider request so a
   // vision-capable model can see the page. Shown once, then cleared.
   private pendingImages: ImageData[] = [];
+  // Running token totals + estimated cost for this session, fed from each
+  // provider call's usage metadata; also enforces the configured budget.
+  private readonly usage = new UsageTracker();
 
   // Multi-phase planning + resumable persistence.
   private readonly planner: Planner;
@@ -184,6 +192,7 @@ export class AgentLoop extends EventEmitter {
         history: this.session.getHistory(),
       });
       const result = await this.provider.generate(request);
+      this.trackUsage(result);
       return parseReflection(result.text);
     } catch {
       return null;
@@ -230,6 +239,18 @@ export class AgentLoop extends EventEmitter {
   /** The id of the session this loop persists under. */
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** Current session token/cost totals (a copy). */
+  get sessionUsage(): SessionUsage {
+    return this.usage.get();
+  }
+
+  /** Record one provider call's token usage and notify listeners. */
+  private trackUsage(result: GenerateResult): void {
+    if (result.usage) {
+      this.emit("usage", this.usage.add(this.provider.name, result.usage));
+    }
   }
 
   /**
@@ -338,6 +359,21 @@ export class AgentLoop extends EventEmitter {
       }
 
       for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+        // Budget gate: stop BEFORE the next provider call once the estimated
+        // session cost has reached the configured limit (0 = unlimited).
+        this.usage.budgetUsd = getConfig().budgetUsd;
+        if (this.usage.overBudget()) {
+          const totals = this.usage.get();
+          this.persistState();
+          this.emit(
+            "stuck",
+            `Budget limit reached: estimated cost ~$${totals.costUsd.toFixed(2)} of the ` +
+              `$${this.usage.budgetUsd.toFixed(2)} budget (${totals.calls} provider calls). ` +
+              `Raise "budgetUsd" in settings (or set it to 0) to continue.`,
+          );
+          return;
+        }
+
         const useVision = this.provider.supportsVision && getConfig().enableVision;
         const request = buildGenerateRequest({
           agentMd: this.agentMemory.getContent(),
@@ -359,6 +395,7 @@ export class AgentLoop extends EventEmitter {
           this.emit("error", `Provider call failed: ${errMessage(err)}`);
           return;
         }
+        this.trackUsage(result);
 
         // ---- Resolve the action: native tool call, else parsed JSON text -----
         const parsed = responseFromResult(result);

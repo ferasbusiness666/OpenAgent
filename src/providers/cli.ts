@@ -86,35 +86,54 @@ function detectOllamaModel(): string {
   }
 }
 
+/** How to invoke one supported CLI non-interactively. */
+interface CliInvocation {
+  /** Build the argv for this CLI given the full prompt and (trimmed) model string.
+   *  `model` is "" when none is configured; implementations must handle both cases.
+   *  The prompt is always a discrete argv element — never shell-interpolated. */
+  args: (prompt: string, model: string) => string[];
+}
+
+/**
+ * Table-driven registry of known CLI invocations. Adding support for a new CLI
+ * requires only a new record here — no branching logic elsewhere.
+ */
+const CLI_INVOCATIONS: Readonly<Record<string, CliInvocation>> = {
+  gemini: {
+    args: (prompt, model) => (model ? ["-p", prompt, "-m", model] : ["-p", prompt]),
+  },
+  claude: {
+    args: (prompt, model) => (model ? ["-p", prompt, "--model", model] : ["-p", prompt]),
+  },
+  codex: {
+    // Run non-interactively / unattended.
+    args: (prompt, _model) => ["--full-auto", prompt],
+  },
+  aider: {
+    args: (prompt, model) =>
+      model
+        ? ["--model", model, "--message", prompt, "--yes", "--no-auto-commits"]
+        : ["--message", prompt, "--yes", "--no-auto-commits"],
+  },
+  goose: {
+    args: (prompt, _model) => ["run", "--text", prompt],
+  },
+  ollama: {
+    // An explicit model overrides the auto-detected first installed model.
+    args: (prompt, model) => ["run", model || detectOllamaModel(), prompt],
+  },
+};
+
 /**
  * Build the argv for a given CLI. The full prompt is passed as a discrete
  * argument (never interpolated into a shell string) so quoting and shell
  * metacharacters in the prompt cannot break the invocation or inject commands.
  * When `model` is non-empty the per-CLI model flag is injected.
+ * Unknown CLIs receive the prompt as a single positional argument.
  */
 function buildArgs(cli: string, prompt: string, model: string): string[] {
   const m = model.trim();
-  switch (cli) {
-    case "gemini":
-      return m ? ["-p", prompt, "-m", m] : ["-p", prompt];
-    case "claude":
-      return m ? ["-p", prompt, "--model", m] : ["-p", prompt];
-    case "codex":
-      // Run non-interactively / unattended.
-      return ["--full-auto", prompt];
-    case "aider":
-      return m
-        ? ["--model", m, "--message", prompt, "--yes", "--no-auto-commits"]
-        : ["--message", prompt, "--yes", "--no-auto-commits"];
-    case "goose":
-      return ["run", "--text", prompt];
-    case "ollama":
-      // An explicit model overrides the auto-detected first installed model.
-      return ["run", m || detectOllamaModel(), prompt];
-    default:
-      // Unknown CLIs receive the prompt as a single positional argument.
-      return [prompt];
-  }
+  return CLI_INVOCATIONS[cli]?.args(prompt, m) ?? [prompt];
 }
 
 /**

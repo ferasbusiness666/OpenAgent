@@ -33,14 +33,37 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
   },
   {
     name: "filesystem",
-    description: "Read/write/list/delete/mkdir files, relative to the workspace.",
+    description:
+      "File operations relative to the workspace: read/write/list/delete/mkdir, plus grep (search file contents by regex), find (locate files by name glob), and diff (compare two files).",
     parameters: obj(
       {
-        operation: { type: "string", enum: ["read", "write", "list", "delete", "mkdir"] },
-        path: str("workspace-relative path"),
+        operation: {
+          type: "string",
+          enum: ["read", "write", "list", "delete", "mkdir", "grep", "find", "diff"],
+        },
+        path: str("workspace-relative path (grep/find: the directory or file to search, default the workspace root; diff: the FIRST file)"),
         content: str("file contents (write only)"),
+        pattern: str("grep: the regex to search for; find: the file-name glob, e.g. *.ts"),
+        pathB: str("diff: the SECOND file to compare against"),
+        recursive: bool("grep/find: search subdirectories (default true)"),
+        caseInsensitive: bool("grep: case-insensitive match (default false)"),
       },
-      ["operation", "path"],
+      ["operation"],
+    ),
+  },
+  {
+    name: "http",
+    description:
+      "Make an HTTP request and return status + headers + body (JSON pretty-printed). Use this instead of curl. Private/internal network addresses are blocked.",
+    parameters: obj(
+      {
+        method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] },
+        url: str("the absolute http(s) URL to request"),
+        headers: { type: "object", description: "request headers", additionalProperties: { type: "string" } },
+        body: str("request body (POST/PUT/PATCH); objects should be JSON-encoded"),
+        timeoutMs: num("timeout in ms (default 30000)"),
+      },
+      ["url"],
     ),
   },
   {
