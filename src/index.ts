@@ -250,6 +250,7 @@ async function main(): Promise<void> {
       sessionId,
       goal: resumedState?.goal,
       phases: resumedState?.phases,
+      workingMemory: resumedState?.metadata.workingMemory,
     });
     if (resumedState) {
       console.log(
@@ -319,6 +320,7 @@ async function main(): Promise<void> {
     sessionId,
     goal: resumedState?.goal,
     phases: resumedState?.phases,
+    workingMemory: resumedState?.metadata.workingMemory,
   });
   if (resumedState) {
     console.log(

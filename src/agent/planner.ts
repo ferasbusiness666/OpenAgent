@@ -22,6 +22,7 @@ export const ACTION_NAMES = [
   "memory",
   "serve",
   "http",
+  "note",
   "update_plan",
   "done",
   "stuck",
@@ -108,8 +109,8 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
             OR { "tasks": ["js source", ...] } to run several JS snippets in parallel.
    "js" runs in an isolated in-process sandbox (safe, no filesystem/network). The other languages run via the local interpreter (if installed) in the workspace, with full system access — those require the user's approval, like shell.
 
-7. memory — durable long-term memory, searchable with keyword (BM25) ranking.
-   params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "query": "search text (recall)", "topK": number (optional) }
+7. memory — durable long-term memory, searchable by MEANING (semantic + keyword hybrid).
+   params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "importance": number 1-10 (remember, optional), "query": "search text (recall)", "topK": number (optional) }
 
 8. serve — host a workspace directory over HTTP on localhost and return the URL (local preview).
    params: { "dir": "workspace-relative dir (optional, default the workspace root)", "port": number (optional) }
@@ -118,13 +119,16 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
    params: { "method": "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" (default GET), "url": "absolute http(s) URL",
              "headers": { "name": "value" } (optional), "body": "string (POST/PUT/PATCH)", "timeoutMs": number (optional) }
 
-10. update_plan — report progress on a phase (alternative to the "progress" field).
+10. note — record durable task state in working memory (shown back to you every turn): facts discovered, constraints, named variables. Use it for things you must not forget mid-task.
+   params: { "facts": ["..."], "constraints": ["..."], "variables": { "name": "value" } } (all optional)
+
+11. update_plan — report progress on a phase (alternative to the "progress" field).
    params: { "phase": number, "status": "in_progress" | "completed" | "failed", "finding": "short note (optional)" }
 
-11. done — the task is fully complete. Put the final answer to the user in "message".
+12. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-12. stuck — you cannot proceed without the user. Explain what you need in "message".
+13. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -161,7 +165,7 @@ If you have been given tools (function calling), CALL a tool — the tool name i
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
-  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | note | done | stuck",
   "params": { ... },
   "message": "what to show the user (optional)",
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }
@@ -210,6 +214,10 @@ export interface PromptOptions {
   phases?: Phase[];
   /** Images (e.g. a screenshot) to attach to the final user turn for vision. */
   images?: ImageData[];
+  /** IMP-08: rendered working-memory block (facts/constraints/artifacts/
+   *  variables), recited in the final user turn — never the cacheable system
+   *  prefix. Omitted when empty. */
+  workingMemory?: string;
 }
 
 /**
@@ -230,8 +238,12 @@ export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
   const planBlock = hasPlan
     ? `\n\n# Current plan (work through it; keep it updated via "progress")\n${renderPlan(opts.phases ?? [])}`
     : "";
+  const wmBlock =
+    opts.workingMemory !== undefined && opts.workingMemory.trim().length > 0
+      ? `\n\n# Working memory (your accumulated task state — keep it updated via "note")\n${opts.workingMemory}`
+      : "";
   const finalTurn =
-    `# Current context\nCurrent date and time: ${now.toString()}${planBlock}\n\n` +
+    `# Current context\nCurrent date and time: ${now.toString()}${planBlock}${wmBlock}\n\n` +
     `# Your turn\nRespond now with the SINGLE JSON object for your next action. Output only the JSON.`;
 
   // Append the volatile turn to the last user message (keeps roles alternating)

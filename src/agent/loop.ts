@@ -20,6 +20,8 @@ import { Planner, type Phase } from "./plan.js";
 import { SessionManager, type AgentState } from "../memory/session-manager.js";
 import { Corrector } from "./corrector.js";
 import { UsageTracker, type SessionUsage } from "./usage.js";
+import { WorkingMemory } from "./working-memory.js";
+import { LongTermMemory } from "../memory/longterm.js";
 import { extractJsonObject } from "../util/json.js";
 import { randomUUID } from "node:crypto";
 
@@ -154,6 +156,11 @@ export interface AgentLoopOptions {
   sessionId?: string;
   goal?: string;
   phases?: Phase[];
+  /** IMP-08: persisted working-memory snapshot to restore (from AgentState
+   *  metadata). Tolerates any shape — malformed input restores empty. */
+  workingMemory?: unknown;
+  /** Override the long-term memory store (tests use a temp directory). */
+  longTermMemory?: LongTermMemory;
 }
 
 /** A request to approve a potentially risky action (currently shell commands). */
@@ -212,6 +219,11 @@ export class AgentLoop extends EventEmitter {
   private readonly sessionId: string;
   private goal: string;
   private phases: Phase[];
+  // IMP-08: structured task state (facts/constraints/artifacts/variables),
+  // recited in every provider turn and persisted with the session.
+  private readonly workingMemory: WorkingMemory;
+  // IMP-09: durable store for success patterns (and the memory tool's notes).
+  private readonly longTerm: LongTermMemory;
 
   constructor(
     provider: Provider,
@@ -231,6 +243,8 @@ export class AgentLoop extends EventEmitter {
       options?.sessionId ?? this.sessionManager?.newSessionId() ?? randomUUID();
     this.goal = options?.goal ?? "";
     this.phases = options?.phases ?? [];
+    this.workingMemory = WorkingMemory.from(options?.workingMemory);
+    this.longTerm = options?.longTermMemory ?? new LongTermMemory();
   }
 
   /** True while a run() is in progress (used by the Telegram queue). */
@@ -354,7 +368,7 @@ export class AgentLoop extends EventEmitter {
       goal: this.goal,
       phases: this.phases,
       history: this.session.getHistory(),
-      metadata: {},
+      metadata: { workingMemory: this.workingMemory.data },
       updatedAt: new Date().toISOString(),
     };
     this.sessionManager.save(state);
@@ -383,6 +397,35 @@ export class AgentLoop extends EventEmitter {
     }
     this.emit("phaseUpdate", this.plan);
     this.persistState();
+  }
+
+  /**
+   * IMP-08: derive working-memory artifacts from successful tool runs without
+   * any model cooperation — files written/dirs created, preview URLs, and
+   * screenshots are durable task outputs worth keeping in front of the model.
+   */
+  private trackArtifact(action: TurnAction, resultText: string): void {
+    if (action.action === "filesystem") {
+      const op = typeof action.params.operation === "string" ? action.params.operation : "";
+      const target = typeof action.params.path === "string" ? action.params.path : "";
+      if ((op === "write" || op === "mkdir") && target.length > 0) {
+        this.workingMemory.addArtifact(target);
+      }
+      return;
+    }
+    if (action.action === "serve") {
+      const url = /https?:\/\/localhost:\d+/.exec(resultText)?.[0];
+      if (url !== undefined) {
+        this.workingMemory.addArtifact(url);
+      }
+      return;
+    }
+    if (action.action === "browser" && action.params.operation === "screenshot") {
+      const file = /([^\s"']+\.png)/i.exec(resultText)?.[1];
+      if (file !== undefined) {
+        this.workingMemory.addArtifact(file);
+      }
+    }
   }
 
   /** Apply an `update_plan` action's params as a progress signal. */
@@ -487,6 +530,30 @@ export class AgentLoop extends EventEmitter {
         first.status = "in_progress";
       }
       this.persistState();
+
+      // IMP-09: few-shot from past successes — surface up to two stored
+      // success patterns for similar tasks as guidance. Gated on a session
+      // manager (real runs) so ephemeral/test loops neither read nor learn.
+      if (this.sessionManager) {
+        try {
+          const hits = await this.longTerm.recallHybrid(task, 3, { tag: "success_pattern" });
+          const top = hits.slice(0, 2);
+          if (top.length > 0) {
+            const blocks = top.map(
+              (hit, i) => `${i + 1}. ${this.longTerm.read(hit.id) ?? hit.excerpt}`,
+            );
+            this.session.add({
+              role: "system",
+              content:
+                "Past successful approaches to similar tasks (guidance — adapt as needed):\n" +
+                blocks.join("\n"),
+              timestamp: new Date(),
+            });
+          }
+        } catch {
+          // Few-shot guidance is best-effort; planning proceeds without it.
+        }
+      }
     }
     ctx.maxIterations = resolveMaxIterations(this.phases.length);
   }
@@ -534,6 +601,8 @@ export class AgentLoop extends EventEmitter {
       now: new Date(),
       phases: this.phases,
       images: useVision && this.pendingImages.length > 0 ? this.pendingImages : undefined,
+      // IMP-08: recite the accumulated task state in the volatile final turn.
+      workingMemory: this.workingMemory.isEmpty() ? undefined : this.workingMemory.render(),
     });
     // Screenshots are shown once: clear them whether or not vision is on, so
     // they never accumulate across turns.
@@ -590,6 +659,15 @@ export class AgentLoop extends EventEmitter {
     const planUpdates = turn.actions.filter((a) => a.action === "update_plan");
     for (const update of planUpdates) {
       this.applyUpdatePlanAction(update.params);
+    }
+
+    // ---- Working-memory notes (IMP-08): apply and persist -----------------------
+    let noted = 0;
+    for (const note of turn.actions.filter((a) => a.action === "note")) {
+      noted += this.workingMemory.applyNote(note.params);
+    }
+    if (noted > 0) {
+      this.persistState();
     }
 
     const terminal = turn.actions.find((a) => a.action === "done" || a.action === "stuck");
@@ -775,6 +853,8 @@ export class AgentLoop extends EventEmitter {
         if (s.action.action === "browser" && s.action.params.operation === "screenshot") {
           this.queueScreenshot(result.result);
         }
+        // IMP-08: auto-track produced artifacts in working memory.
+        this.trackArtifact(s.action, result.result);
       } else {
         const signature = `${s.action.action}:${stableStringify(s.action.params)}`;
         const outcome = ctx.corrector.recordFailure(signature);
@@ -909,6 +989,49 @@ export class AgentLoop extends EventEmitter {
     return `[verify filesystem ${op}] ${compressObservation(body, 3000)}`;
   }
 
+  /**
+   * IMP-09: after a completed task, store a compact "success pattern" (goal +
+   * the tool sequence that worked) tagged `success_pattern`, so future similar
+   * tasks get it back as few-shot guidance. Gated on a session manager (real
+   * runs only) and on the task having taken at least two real tool steps.
+   */
+  private async recordSuccessPattern(): Promise<void> {
+    if (!this.sessionManager || this.goal.trim().length === 0) {
+      return;
+    }
+    const sequence: string[] = [];
+    for (const message of this.session.getHistory()) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      try {
+        const obj = JSON.parse(message.content) as {
+          action?: unknown;
+          actions?: Array<{ action?: unknown }>;
+        };
+        if (typeof obj.action === "string") {
+          sequence.push(obj.action);
+        } else if (Array.isArray(obj.actions)) {
+          for (const a of obj.actions) {
+            if (typeof a.action === "string") {
+              sequence.push(a.action);
+            }
+          }
+        }
+      } catch {
+        // Non-JSON assistant content carries no action — skip.
+      }
+    }
+    const toolSequence = sequence.filter((a) => isActionName(a) && isToolAction(a));
+    if (toolSequence.length < 2 || toolSequence.length > 40) {
+      return;
+    }
+    const content =
+      `Task: ${truncate(this.goal, 300)}\n` +
+      `Successful approach (${toolSequence.length} steps): ${toolSequence.join(" → ")}`;
+    await this.longTerm.rememberWithEmbedding(content, ["success_pattern"], 6);
+  }
+
   /** Emit the terminal event(s) for the final state and persist. */
   private finishTerminal(state: LoopState): void {
     if (state.phase === "done") {
@@ -926,6 +1049,8 @@ export class AgentLoop extends EventEmitter {
         this.emit("phaseUpdate", this.plan);
       }
       this.persistState();
+      // IMP-09: learn from this success (fire-and-forget; never blocks "done").
+      void this.recordSuccessPattern().catch(() => undefined);
       this.emit("done", state.message);
     } else if (state.phase === "stuck") {
       this.persistState();

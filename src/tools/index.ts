@@ -509,6 +509,8 @@ export interface MemoryParams {
   query?: string;
   tags?: string[];
   topK?: number;
+  /** IMP-10: subjective importance 1–10 (remember only; default 5). */
+  importance?: number;
 }
 
 function parseMemoryParams(params: Record<string, unknown>): MemoryParams | string {
@@ -524,6 +526,8 @@ function parseMemoryParams(params: Record<string, unknown>): MemoryParams | stri
     const out: MemoryParams = { operation, content };
     const tags = asStringArray(params.tags);
     if (tags !== null) out.tags = tags;
+    const importance = asNumber(params.importance);
+    if (importance !== null) out.importance = Math.max(1, Math.min(10, Math.round(importance)));
     return out;
   }
   const query = asString(params.query);
@@ -749,10 +753,16 @@ async function executeToolInner(
         return { success: false, result: "", error: parsed };
       }
       if (parsed.operation === "remember") {
-        const saved = registry.memory.remember(parsed.content ?? "", parsed.tags);
+        // IMP-07: embed the note (best-effort) so recall can match by MEANING.
+        const saved = await registry.memory.rememberWithEmbedding(
+          parsed.content ?? "",
+          parsed.tags,
+          parsed.importance,
+        );
         return { success: true, result: `Remembered (id ${saved.id}).` };
       }
-      const hits = registry.memory.recall(parsed.query ?? "", parsed.topK);
+      // IMP-07/10: hybrid BM25 + semantic recall, weighted by importance.
+      const hits = await registry.memory.recallHybrid(parsed.query ?? "", parsed.topK);
       return { success: true, result: formatRecallHits(parsed.query ?? "", hits) };
     }
 

@@ -133,12 +133,14 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
   },
   {
     name: "memory",
-    description: "Durable long-term memory: store a note or recall by keyword (BM25).",
+    description:
+      "Durable long-term memory: store a note or recall by MEANING (semantic + keyword hybrid search).",
     parameters: obj(
       {
         operation: { type: "string", enum: ["remember", "recall"] },
         content: str("text to store (remember)"),
         tags: { type: "array", items: { type: "string" } },
+        importance: num("how important this note is, 1-10 (remember; default 5)"),
         query: str("search text (recall)"),
         topK: num("max hits (recall)"),
       },
@@ -152,6 +154,23 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
       {
         dir: str("workspace-relative directory to serve (default the workspace root)"),
         port: num("preferred port (a free one is chosen if omitted/taken)"),
+      },
+      [],
+    ),
+  },
+  {
+    name: "note",
+    description:
+      "Record durable task state in working memory (shown back to you every turn): facts discovered, constraints that must hold, or named variables resolved (ids, paths, URLs). Use it for things you must not forget mid-task.",
+    parameters: obj(
+      {
+        facts: { type: "array", items: { type: "string" }, description: "facts discovered" },
+        constraints: { type: "array", items: { type: "string" }, description: "constraints that must hold" },
+        variables: {
+          type: "object",
+          description: "named values resolved, e.g. {\"port\": \"3000\"}",
+          additionalProperties: { type: "string" },
+        },
       },
       [],
     ),

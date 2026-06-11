@@ -23,12 +23,15 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
 - **Multi-language code execution** — the `code` tool runs **JavaScript, Python, Node, Bash, and PowerShell** in resource-limited worker threads (timeout + force-kill), confined to the workspace. JavaScript runs in an isolated in-process `vm` sandbox (safe, no FS/network; `isolated-vm` is an opt-in hardening hook via `OPENAGENT_SANDBOX=isolated-vm`); the other languages run via the local interpreter when installed and — having full system access like `shell` — are gated by the same approval prompt. JS snippets can also run several-at-once in parallel. (No Docker required; without it, isolation is process- and timeout-level, not a hardened VM.)
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
-- **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
+- **Semantic long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them by *meaning*: hybrid search blends BM25 keywords with embedding similarity ("fix the npm error" now matches "resolve node_modules issue"). Embeddings come from your provider's API when a key exists (OpenAI/Gemini), otherwise from a **local model** (all-MiniLM via transformers.js, ~25 MB downloaded once, no key needed); with neither, recall degrades gracefully to keywords. No vector DB needed — exact cosine over personal-scale notes beats an ANN index.
+- **Memory importance scoring** — notes carry an importance (1–10) that retrieval frequency boosts and staleness decays; recall ranks accordingly, and a `minImportance` filter keeps low-value notes out when context is tight.
+- **Structured working memory** — a typed store of facts / constraints / artifacts / variables the agent accumulates mid-task (via the cheap `note` action; files it writes and URLs it serves are tracked automatically) and sees again every turn — multi-step tasks stop forgetting what they learned in step 2. Persisted with the session, restored on resume.
+- **Learns from successes** — when a task completes, the goal + the tool sequence that worked is stored as a `success_pattern` memory; similar future tasks get the top patterns injected as few-shot guidance, so the agent improves over time without fine-tuning.
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
 - **Verification before done** — before accepting `done`, a checking pass reviews the work against the original goal and can *actually inspect the results* with read-only filesystem operations (re-read generated files, grep for expected content, diff outputs — bounded to a few calls) before delivering its verdict; an incomplete verdict feeds the gap back and the agent keeps working. Toggle `enableReflection` in `/settings`.
 - **Native function-calling** — with an API provider the agent acts via real tool/function calls (Anthropic tools, OpenAI/Groq functions, Gemini functionDeclarations), so its actions are structured rather than parsed out of text — far fewer malformed-action retries. CLI providers fall back to the JSON action protocol.
 - **Local preview** — the `serve` tool hosts a workspace directory over HTTP on `localhost` and returns the URL, for previewing what the agent built.
-- **Eval harness** — `npx tsx scripts/eval.ts` runs canned tasks end-to-end and scores them (`--selftest` checks the harness offline); useful for catching quality regressions.
+- **Eval harness** — `npx tsx scripts/eval.ts` runs 12 canonical tasks end-to-end and reports pass/fail plus per-task steps, tokens, cost, and wall time (`--json` writes `eval-results.json` for tracking across commits; `--selftest` drives the full loop+tools path offline with a scripted provider).
 - **Background runs** — launch a task that runs to completion in a **detached process** which outlives the terminal (`/background <task>` or `openagent --background "…"`). It streams its lifecycle to `~/.openagent/runs/<id>.log`, persists its state, and notifies on completion (Telegram + a desktop ping). List runs with `/runs` and follow one live with `/attach <id>`.
 - **Local scheduling** — recurring/one-shot tasks live in `~/.openagent/schedules.json`, fired by an in-process poller (`/schedule`); a due task launches as a background run so it never blocks the foreground agent.
 - **GitHub connector** — read **and write** GitHub access via the `github` tool (list repos, read files, list issues, create/comment/close issues, list/get/create pull requests), authenticated with the `GITHUB_TOKEN` environment variable.
@@ -238,7 +241,8 @@ src/
              research, code (multi-language), serve (local preview),
              http (SSRF-guarded client), registry
   agent/     ... + tool-schemas (native function-calling definitions),
-             usage (token/cost tracking + budget)
+             usage (token/cost tracking + budget),
+             working-memory (structured task state, recited every turn)
   eval/      eval-harness tasks (scripts/eval.ts runs them)
   workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
   scheduler/ file-based scheduler + types
@@ -246,9 +250,11 @@ src/
   providers/ detector, cli (table-driven invocations), api, factory,
              catalog (API provider metadata), mock (mock/recording/replay
              providers for offline testing)
-  memory/    session (in-memory + disk persistence),
+  memory/    session (in-memory + disk persistence + token compaction),
              session-store (session file paths/serialization),
-             session-manager (resumable AgentState), longterm (BM25 memory),
+             session-manager (resumable AgentState),
+             longterm (hybrid BM25+semantic memory, importance scoring),
+             embeddings (OpenAI/Gemini/local-model backends),
              projects (projects.json registry), agent-md (durable)
   ui/        + WorkerPanel (parallel-worker visualization), Onboarding (7-step first-run flow)
   telegram/  remote-control bridge
