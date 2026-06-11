@@ -4,46 +4,72 @@ import type { Phase } from "./plan.js";
 import { renderPlan } from "./plan.js";
 import type { GenerateRequest, ChatMessage, ImageData } from "../providers/messages.js";
 import { extractJsonObject } from "../util/json.js";
-import { AGENT_TOOLS } from "./tool-schemas.js";
+import { AGENT_TOOLS, VERIFY_TOOLS } from "./tool-schemas.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
  * the system prompt that enforces this, and the loop parses provider output
  * against `AgentResponseSchema`.
  */
-export const AgentResponseSchema = z.object({
-  thought: z.string(),
-  action: z.enum([
-    "shell",
-    "filesystem",
-    "browser",
-    "github",
-    "research",
-    "code",
-    "memory",
-    "serve",
-    "http",
-    "update_plan",
-    "done",
-    "stuck",
-  ]),
-  params: z.record(z.unknown()).default({}),
-  message: z.string().optional(),
-  // Optional plan-progress signal. When present the loop updates the matching
-  // phase's status and records the finding. Never required, so existing
-  // responses that omit it stay valid.
-  // .catch(undefined) ensures a malformed or null progress value (e.g. the
-  // model emits `"progress": null` or `"phase": "1"`) degrades to "no progress"
-  // instead of causing safeParse to reject the entire response.
-  progress: z
-    .object({
-      phase: z.coerce.number(),
-      status: z.enum(["in_progress", "completed", "failed"]),
-      finding: z.string().optional(),
-    })
-    .optional()
-    .catch(undefined),
-});
+/** Every action the model can take: the real tools + the control actions. */
+export const ACTION_NAMES = [
+  "shell",
+  "filesystem",
+  "browser",
+  "github",
+  "research",
+  "code",
+  "memory",
+  "serve",
+  "http",
+  "update_plan",
+  "done",
+  "stuck",
+] as const;
+export type ActionName = (typeof ACTION_NAMES)[number];
+
+export function isActionName(value: string): value is ActionName {
+  return (ACTION_NAMES as readonly string[]).includes(value);
+}
+
+export const AgentResponseSchema = z
+  .object({
+    thought: z.string(),
+    // Optional ONLY when an "actions" batch is present (see the refine below).
+    action: z.enum(ACTION_NAMES).optional(),
+    params: z.record(z.unknown()).default({}),
+    message: z.string().optional(),
+    // IMP-02: several INDEPENDENT actions in one turn, executed in parallel.
+    // .catch(undefined) degrades a malformed batch to "no batch" so a bad
+    // entry can't reject an otherwise-valid single-action response.
+    actions: z
+      .array(
+        z.object({
+          action: z.enum(ACTION_NAMES),
+          params: z.record(z.unknown()).default({}),
+          message: z.string().optional(),
+        }),
+      )
+      .optional()
+      .catch(undefined),
+    // Optional plan-progress signal. When present the loop updates the matching
+    // phase's status and records the finding. Never required, so existing
+    // responses that omit it stay valid.
+    // .catch(undefined) ensures a malformed or null progress value (e.g. the
+    // model emits `"progress": null` or `"phase": "1"`) degrades to "no progress"
+    // instead of causing safeParse to reject the entire response.
+    progress: z
+      .object({
+        phase: z.coerce.number(),
+        status: z.enum(["in_progress", "completed", "failed"]),
+        finding: z.string().optional(),
+      })
+      .optional()
+      .catch(undefined),
+  })
+  .refine((r) => r.action !== undefined || (r.actions !== undefined && r.actions.length > 0), {
+    message: 'response must include an "action" (or a non-empty "actions" array)',
+  });
 
 export type AgentResponse = z.infer<typeof AgentResponseSchema>;
 
@@ -129,7 +155,7 @@ ${opts.agentMd}
 ${TOOL_REFERENCE}
 
 # How to act
-If you have been given tools (function calling), CALL exactly one tool per step — the tool name is the action and its arguments are the params. Otherwise, respond with the SINGLE JSON object described below.
+If you have been given tools (function calling), CALL a tool — the tool name is the action and its arguments are the params. When several actions are INDEPENDENT of each other (e.g. reading three files, or two unrelated commands), you may call SEVERAL tools in the same turn and they will run in parallel; actions that depend on an earlier result must wait for their own turn. Otherwise, respond with the SINGLE JSON object described below.
 
 # Response format (when not using tools) — THIS IS MANDATORY
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
@@ -141,13 +167,15 @@ You must ALWAYS respond with a SINGLE valid JSON object matching this exact shap
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }
 }
 The "progress" field is optional; include it only to report plan progress.
+To run several INDEPENDENT actions in parallel, replace "action"/"params" with an "actions" array:
+  "actions": [ { "action": "filesystem", "params": { ... } }, { "action": "shell", "params": { ... } } ]
 
 Rules:
 - You must ALWAYS respond with valid JSON matching the specified format. Never respond with plain text.
 - Never wrap the JSON in markdown code fences. Output the raw JSON object only.
 - Never ask the user a question unless your action is "stuck".
 - Always take the next concrete action that moves the task forward.
-- Use exactly one action per response. Look at the latest TOOL RESULT before deciding the next step.
+- Use one action per response — or an "actions" batch ONLY when the actions are independent of each other. Look at the latest TOOL RESULT before deciding the next step.
 - When the task is finished, use action "done" and put the final answer in "message".
 - When a plan is shown in the current turn, work through it phase by phase: report progress via the "progress" field (phase id + status + a short finding), and use action "done" only when ALL phases are complete.`;
 }
@@ -236,29 +264,44 @@ export interface Reflection {
 /**
  * Build the request asked of the model right before accepting "done": review
  * the full transcript against the goal and judge whether it is truly finished.
+ *
+ * IMP-05: the reviewer may VERIFY before judging — the request offers the
+ * filesystem tool (read-only operations only; the loop enforces that) plus a
+ * `verdict` tool, so the model can re-read generated files, grep for expected
+ * content, or diff outputs instead of trusting the transcript. Observations
+ * gathered by earlier verification steps are passed back via `observations`.
  */
 export function buildReflectionRequest(opts: {
   agentMd: string;
   workspacePath: string;
   goal: string;
   history: Message[];
+  /** Tool observations from earlier rounds of this verification pass. */
+  observations?: string[];
 }): GenerateRequest {
   const system = `You are the SELF-CHECK reviewer for Open Agent. Given the original goal and the full work transcript, judge whether the goal has been FULLY and correctly accomplished — not merely attempted. Be strict but fair: only say complete when a user would agree the task is genuinely done.
 
-Respond with ONLY a single JSON object and nothing else:
+You are CHECKING, not doing. Before judging you may verify the actual results — re-read a generated file, grep for expected content, list a directory, diff two files — using the filesystem tool with operations read, list, grep, find, or diff ONLY (writes are not available to you). Verify at most a few key facts, then deliver the verdict.
+
+To deliver the verdict, call the "verdict" tool — or respond with ONLY a single JSON object and nothing else:
 { "complete": true | false, "reason": "one short sentence", "nextStep": "if not complete, the single most important next action" }`;
 
   const messages = mapHistory(opts.history);
+  const observationBlock =
+    opts.observations && opts.observations.length > 0
+      ? `\n\n# Your verification observations so far\n${opts.observations.join("\n\n")}`
+      : "";
   const finalTurn =
-    `# Original goal\n${opts.goal}\n\n# Your turn\n` +
-    `Review the transcript above against the goal and respond now with the SINGLE JSON verdict.`;
+    `# Original goal\n${opts.goal}${observationBlock}\n\n# Your turn\n` +
+    `Review the transcript above against the goal. Verify a key fact with a read-only filesystem call if needed, ` +
+    `or respond now with the SINGLE JSON verdict.`;
   const last = messages[messages.length - 1];
   if (last && last.role === "user") {
     last.content = `${last.content}\n\n${finalTurn}`;
   } else {
     messages.push({ role: "user", content: finalTurn });
   }
-  return { system, messages };
+  return { system, messages, tools: [...VERIFY_TOOLS] };
 }
 
 /**

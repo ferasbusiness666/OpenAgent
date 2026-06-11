@@ -179,3 +179,28 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
     parameters: obj({ message: str("what you need from the user") }, []),
   },
 ];
+
+/** The verdict "tool" used only by the verification pass before "done" (IMP-05). */
+export const VERDICT_TOOL: ToolSchema = {
+  name: "verdict",
+  description:
+    "Deliver your verification verdict: is the original goal genuinely, fully accomplished?",
+  parameters: obj(
+    {
+      complete: bool("true only when the goal is fully accomplished"),
+      reason: str("one short sentence justifying the verdict"),
+      nextStep: str("if not complete: the single most important next action"),
+    },
+    ["complete", "reason"],
+  ),
+};
+
+/**
+ * Tools offered during the verification pass: the filesystem tool (the loop
+ * permits only its read-only operations — read/list/grep/find/diff) plus the
+ * verdict. Inspect, never mutate.
+ */
+export const VERIFY_TOOLS: readonly ToolSchema[] = [
+  ...AGENT_TOOLS.filter((t) => t.name === "filesystem"),
+  VERDICT_TOOL,
+];

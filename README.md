@@ -6,7 +6,11 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 
 ## Features
 
-- **Autonomous loop** — ReAct-style plan → act → observe → correct until the task is done.
+- **Autonomous loop** — an explicit state machine (planning → thinking ⇄ executing → verifying → done/stuck/error) drives plan → act → observe → correct until the task is done; every transition is observable, which makes runs debuggable and testable.
+- **Parallel tool execution** — when the model takes several *independent* actions in one turn (read three files, two unrelated commands), they run concurrently; browser actions serialize among themselves since they share one page. Works natively (multiple function calls per turn) and via an `"actions"` array for text-protocol models.
+- **Context auto-compaction** — when the history approaches the model's context budget (~70% of 100k tokens estimated), the oldest half is summarized into one note and the session continues — long tasks no longer silently truncate.
+- **Dynamic step limit** — the per-task iteration cap scales with the plan (20 + 5 per phase, hard ceiling 200) instead of a fixed 50; override per run with `--max-iterations <n>`.
+- **Health check** — `openagent --health-check` verifies provider auth, workspace writability, browser install, and the Telegram token before you invest time in a task.
 - **Guided onboarding & permission control** — a first-run 7-step walkthrough explains what OpenAgent does, how it attaches to a workspace, and how much control you keep. You choose permissions (read files / suggest edits / require command approval); with command approval on, the agent **pauses for your y/n** before running a shell command, and turning off "suggest edits" blocks file writes. Replay it any time with `/onboarding`. (Headless `--task` runs stay fully autonomous.)
 - **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
@@ -21,7 +25,7 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
 - **Long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them with from-scratch BM25 keyword ranking (no vector DB).
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
-- **Self-critique** — before it accepts `done`, the agent reviews the work against the original goal; if it isn't genuinely complete it feeds the gap back and keeps going (bounded, so it never loops forever). Toggle `enableReflection` in `/settings`.
+- **Verification before done** — before accepting `done`, a checking pass reviews the work against the original goal and can *actually inspect the results* with read-only filesystem operations (re-read generated files, grep for expected content, diff outputs — bounded to a few calls) before delivering its verdict; an incomplete verdict feeds the gap back and the agent keeps working. Toggle `enableReflection` in `/settings`.
 - **Native function-calling** — with an API provider the agent acts via real tool/function calls (Anthropic tools, OpenAI/Groq functions, Gemini functionDeclarations), so its actions are structured rather than parsed out of text — far fewer malformed-action retries. CLI providers fall back to the JSON action protocol.
 - **Local preview** — the `serve` tool hosts a workspace directory over HTTP on `localhost` and returns the URL, for previewing what the agent built.
 - **Eval harness** — `npx tsx scripts/eval.ts` runs canned tasks end-to-end and scores them (`--selftest` checks the harness offline); useful for catching quality regressions.
@@ -170,6 +174,14 @@ openagent --background "refactor the utils module and run the tests"
 
 In a non-TTY environment the UI falls back to plain console output.
 
+Useful flags (each applies to the current run only):
+
+```bash
+openagent --health-check            # verify provider/workspace/browser/Telegram, then exit
+openagent --task "…" --budget 0.50  # stop before the estimated cost exceeds $0.50
+openagent --task "…" --max-iterations 80   # override the dynamic step limit
+```
+
 ## How it works
 
 On startup the agent merges two memory files into its system prompt: `~/.openagent/AGENT.md` (global memory — preferences and general info about you) and `<cwd>/AGENT.md` (project-specific memory). Either is created from a template if it is missing.
@@ -245,6 +257,7 @@ src/
              sandbox (the single workspace path-confinement impl),
              net-guard (SSRF protection for browser/http)
   audit.ts   JSONL audit log of every tool execution
+  health.ts  --health-check component verification
   paths.ts   ~/.openagent locations + legacy migration
   startup.ts trust prompt → project detection → first-run wizard
   setup.ts   first-run provider wizard

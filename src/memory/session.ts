@@ -31,8 +31,23 @@ export const SESSION_MAX = 500;
 /** How many of the oldest messages are summarized into one note on rollover. */
 export const SESSION_SUMMARIZE = 250;
 
-/** Build a compact, deterministic summary note from archived messages. */
-function summarizeArchived(messages: Message[]): string {
+/** Conservative default context budget (tokens) across supported models. */
+export const CONTEXT_TOKEN_LIMIT = 100_000;
+/** Fraction of the limit at which token compaction triggers (IMP-03's 70%). */
+export const COMPACT_THRESHOLD = 0.7;
+
+/** Rough token estimate for messages: ceil(content chars / 4), summed. */
+export function estimateTokens(messages: readonly Message[]): number {
+  let total = 0;
+  for (const m of messages) {
+    total += Math.ceil(m.content.length / 4);
+  }
+  return total;
+}
+
+/** Build a compact, deterministic summary note from archived messages.
+ *  `reason` explains WHY the archive happened (message cap vs. token budget). */
+function summarizeArchived(messages: Message[], reason: string): string {
   const firstLine = (text: string): string => {
     const line = text.split(/\r?\n/)[0] ?? "";
     return line.length > 120 ? `${line.slice(0, 120)}…` : line;
@@ -50,7 +65,7 @@ function summarizeArchived(messages: Message[]): string {
     .join(", ");
   return [
     `[Earlier conversation summary] ${messages.length} earlier messages ` +
-      `(${countStr}) were archived to keep this session within its ${SESSION_MAX}-message limit. ` +
+      `(${countStr}) were archived ${reason}. ` +
       `The full transcript is preserved in the previous session file.`,
     userTasks.length > 0
       ? `Requests handled so far${tail.length < userTasks.length ? " (most recent)" : ""}:\n${tail.join("\n")}`
@@ -183,6 +198,35 @@ export class SessionMemory {
     }
   }
 
+  /** Estimated tokens of the current history (chars / 4). */
+  estimateTokens(): number {
+    return estimateTokens(this.history);
+  }
+
+  /**
+   * IMP-03: token-based context compaction. When the estimated history tokens
+   * exceed `limitTokens × COMPACT_THRESHOLD`, summarize the OLDEST HALF of the
+   * history into one system note and keep the recent tail — same mechanics as
+   * the message-count rollover, so the previous session file stays intact as
+   * the archive. The loop calls this before every provider request; one pass
+   * per call (no internal loop), so a still-large tail compacts again next turn.
+   *
+   * @returns true when compaction happened.
+   */
+  compactIfNeeded(limitTokens = CONTEXT_TOKEN_LIMIT): boolean {
+    if (this.history.length < 4) {
+      return false;
+    }
+    if (this.estimateTokens() <= limitTokens * COMPACT_THRESHOLD) {
+      return false;
+    }
+    this.archiveOldest(
+      Math.floor(this.history.length / 2),
+      `to keep this session within its context-token budget`,
+    );
+    return true;
+  }
+
   /**
    * When the history reaches the cap, archive it (the current file already holds
    * the full transcript), summarize the oldest messages into one system note,
@@ -192,11 +236,24 @@ export class SessionMemory {
     if (this.history.length < SESSION_MAX) {
       return;
     }
-    const archived = this.history.slice(0, SESSION_SUMMARIZE);
-    const tail = this.history.slice(SESSION_SUMMARIZE);
+    this.archiveOldest(
+      SESSION_SUMMARIZE,
+      `to keep this session within its ${SESSION_MAX}-message limit`,
+    );
+  }
+
+  /**
+   * Shared archive mechanics for BOTH rollover paths (message cap + token
+   * budget), so the two can never drift: summarize the oldest `count` messages
+   * into one system note, keep the tail, and continue in a fresh session file
+   * (the previous file remains as the full-transcript archive).
+   */
+  private archiveOldest(count: number, reason: string): void {
+    const archived = this.history.slice(0, count);
+    const tail = this.history.slice(count);
     const note: Message = {
       role: "system",
-      content: summarizeArchived(archived),
+      content: summarizeArchived(archived, reason),
       timestamp: new Date(),
     };
     this.history = [note, ...tail];

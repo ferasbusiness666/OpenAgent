@@ -49,6 +49,8 @@ interface CliOptions {
   background?: string;
   runDetached?: string;
   budget?: string;
+  maxIterations?: string;
+  healthCheck?: boolean;
 }
 
 /** Attach plain-text console listeners to the loop (headless / fallback mode). */
@@ -95,6 +97,14 @@ async function main(): Promise<void> {
       "--budget <usd>",
       "stop the agent before the estimated session cost exceeds this many USD (this run only)",
     )
+    .option(
+      "--max-iterations <n>",
+      "override the dynamic per-task step limit (default: 20 + 5 per planned phase)",
+    )
+    .option(
+      "--health-check",
+      "verify provider, workspace, browser, and Telegram are working, then exit",
+    )
     .allowExcessArguments(true);
   program.parse(process.argv);
   const options = program.opts<CliOptions>();
@@ -111,10 +121,31 @@ async function main(): Promise<void> {
     }
   }
 
+  // Session-only iteration-cap override (IMP-04), same env-routed pattern.
+  if (options.maxIterations !== undefined) {
+    const n = Number(options.maxIterations);
+    if (Number.isInteger(n) && n > 0) {
+      process.env.OPENAGENT_MAX_ITERATIONS = String(n);
+    } else {
+      console.error(
+        chalk.red(`Invalid --max-iterations value: "${options.maxIterations}" (expected a positive integer).`),
+      );
+      process.exit(1);
+    }
+  }
+
   // Move any legacy data into ~/.openagent/ up front. Pruning of stale sessions
   // is deferred until AFTER the resume target is loaded (below), so resuming an
   // old session never races the cleanup that would delete its state file.
   migrateLegacyData();
+
+  // ---- Health check (IMP-25): verify components, print the report, exit. ----
+  if (options.healthCheck === true) {
+    const { runHealthCheck, formatHealthReport } = await import("./health.js");
+    const report = await runHealthCheck();
+    console.log(formatHealthReport(report));
+    process.exit(report.ok ? 0 : 1);
+  }
 
   // ---- Detached background worker: execute one registered run, then exit. ----
   // This is the headless body spawned by --background; handle it FIRST so it
