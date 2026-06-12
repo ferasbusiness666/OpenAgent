@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import fs from "fs-extra";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
@@ -111,10 +111,14 @@ export class ShellTool {
   /**
    * Execute a command inside the workspace.
    *
+   * IMP-15: when `onChunk` is provided, stdout/stderr text is forwarded to it
+   * incrementally as the command produces it (the UI shows a live preview);
+   * the returned result is unchanged either way.
+   *
    * @returns stdout/stderr/exitCode. Blocked commands return exitCode -1 with
    * an explanatory stderr rather than executing.
    */
-  async run(command: string): Promise<ShellResult> {
+  async run(command: string, onChunk?: (chunk: string) => void): Promise<ShellResult> {
     const trimmed = command.trim();
     if (trimmed.length === 0) {
       return { stdout: "", stderr: "Empty command.", exitCode: -1 };
@@ -142,43 +146,87 @@ export class ShellTool {
       };
     }
 
+    // spawn (not exec) so output can STREAM — exec buffers until exit. The
+    // command still runs through the OS shell, exactly as before.
     return await new Promise<ShellResult>((resolve) => {
-      exec(
-        trimmed,
-        {
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      let truncated = false;
+
+      const finish = (result: ShellResult): void => {
+        if (!settled) {
+          settled = true;
+          resolve(result);
+        }
+      };
+
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(trimmed, {
           cwd: workspace,
-          timeout: TIMEOUT_MS,
-          maxBuffer: MAX_BUFFER,
           windowsHide: true,
           shell: pickShell(),
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            // `error.code` is the process exit code when the process ran and
-            // failed; at runtime it can also be a string (e.g. "ETIMEDOUT")
-            // when spawning failed or the command timed out. We read it as
-            // `unknown` so both shapes are handled without an `any`.
-            const code: unknown = (error as { code?: unknown }).code;
-            let exitCode: number;
-            if (typeof code === "number") {
-              exitCode = code;
-            } else {
-              exitCode = 1;
-            }
-            const extra =
-              typeof code === "string" && code.length > 0
-                ? `${stderr}${stderr ? "\n" : ""}[${code}] ${error.message}`
-                : stderr;
-            resolve({
-              stdout: stdout ?? "",
-              stderr: extra ?? error.message,
-              exitCode,
-            });
-            return;
+        });
+      } catch (err) {
+        finish({
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+          exitCode: 1,
+        });
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Already dead — fine.
+        }
+        finish({
+          stdout,
+          stderr:
+            `${stderr}${stderr ? "\n" : ""}[ETIMEDOUT] Command timed out after ${TIMEOUT_MS / 1000}s and was terminated.`,
+          exitCode: 1,
+        });
+      }, TIMEOUT_MS);
+
+      const append = (target: "out" | "err", chunk: Buffer): void => {
+        const text = chunk.toString("utf8");
+        const current = target === "out" ? stdout : stderr;
+        if (current.length + text.length > MAX_BUFFER) {
+          if (!truncated) {
+            truncated = true;
+            const room = Math.max(0, MAX_BUFFER - current.length);
+            const slice = text.slice(0, room) + "\n... (output truncated at 10 MB)";
+            if (target === "out") stdout += slice;
+            else stderr += slice;
           }
-          resolve({ stdout: stdout ?? "", stderr: stderr ?? "", exitCode: 0 });
-        },
-      );
+          return;
+        }
+        if (target === "out") stdout += text;
+        else stderr += text;
+        if (onChunk) {
+          try {
+            onChunk(text);
+          } catch {
+            // A streaming listener must never break the command itself.
+          }
+        }
+      };
+
+      child.stdout?.on("data", (chunk: Buffer) => append("out", chunk));
+      child.stderr?.on("data", (chunk: Buffer) => append("err", chunk));
+
+      child.on("error", (err: Error) => {
+        clearTimeout(timer);
+        finish({ stdout, stderr: stderr || err.message, exitCode: 1 });
+      });
+
+      child.on("close", (code: number | null) => {
+        clearTimeout(timer);
+        finish({ stdout, stderr, exitCode: typeof code === "number" ? code : 0 });
+      });
     });
   }
 }

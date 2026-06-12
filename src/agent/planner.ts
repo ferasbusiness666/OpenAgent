@@ -5,6 +5,7 @@ import { renderPlan } from "./plan.js";
 import type { GenerateRequest, ChatMessage, ImageData } from "../providers/messages.js";
 import { extractJsonObject } from "../util/json.js";
 import { AGENT_TOOLS, VERIFY_TOOLS } from "./tool-schemas.js";
+import { loadPlugins, renderPluginList } from "../plugins/index.js";
 
 /**
  * The strict JSON contract every provider turn must satisfy. The planner builds
@@ -22,6 +23,7 @@ export const ACTION_NAMES = [
   "memory",
   "serve",
   "http",
+  "plugin",
   "note",
   "update_plan",
   "done",
@@ -90,9 +92,11 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
    Use grep to search inside files, find to locate files by name, diff to compare two files — much cheaper than reading whole files.
 
 3. browser — drive a headless Chromium browser.
-   params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "readText" | "getHtml" | "waitFor" | "scroll" | "press",
-             "url": "(navigate)", "selector": "(click/type/waitFor)", "text": "(type)", "key": "(press, e.g. Enter)", "target": "bottom|top|down|up (scroll)", "timeout": number (waitFor, ms) }
+   params: { "operation": "navigate" | "click" | "type" | "screenshot" | "extractText" | "readText" | "getHtml" | "waitFor" | "scroll" | "press" | "setCookies" | "getCookies" | "injectJs" | "download" | "network",
+             "url": "(navigate/download)", "selector": "(click/type/waitFor)", "text": "(type)", "key": "(press, e.g. Enter)", "target": "bottom|top|down|up (scroll)", "timeout": number (waitFor, ms),
+             "cookies": "JSON array of cookie objects (setCookies)", "script": "JS to evaluate; its value is returned (injectJs)", "path": "workspace-relative save path (download)", "filter": "URL filter (network)" }
    "readText" returns clean main/article text; "waitFor" waits for a selector; "scroll" loads lazy content; "press" sends a key.
+   "setCookies"/"getCookies" manage login sessions; "injectJs" evaluates JS in the page; "download" saves a file using the page's cookies; "network" lists recent requests (method, url, status).
    After a "screenshot", the image is shown back to you on your next turn (with a vision-capable model) so you can SEE the page and reason about it visually.
 
 4. github — GitHub access (requires the GITHUB_TOKEN environment variable). Read AND write operations.
@@ -104,10 +108,12 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
 5. research — research the web for a query (headless browser, no API key). Returns a digest of top results.
    params: { "query": "string", "maxResults": number (optional, default 5), "fetchPages": boolean (optional — also fetch the top pages' text) }
 
-6. code — run a code snippet in a resource-limited worker thread and return its output.
+6. code — run a code snippet in a resource-limited worker thread, install dependencies, or run a test suite.
    params: { "language": "js" | "python" | "node" | "bash" | "powershell" (default "js"), "code": "string (source)", "timeoutMs": number (optional) }
-            OR { "tasks": ["js source", ...] } to run several JS snippets in parallel.
-   "js" runs in an isolated in-process sandbox (safe, no filesystem/network). The other languages run via the local interpreter (if installed) in the workspace, with full system access — those require the user's approval, like shell.
+            OR { "tasks": ["js source", ...] } to run several JS snippets in parallel
+            OR { "operation": "installDeps", "packageManager": "npm" | "pip", "packages": ["name", ...] }
+            OR { "operation": "runTests", "framework": "pytest" | "jest" | "mocha" | "vitest" | "go", "path": "optional test path" } — returns "TESTS: N passed, M failed".
+   "js" runs in an isolated in-process sandbox (safe, no filesystem/network). The other languages — and installDeps/runTests — run via local interpreters in the workspace, with full system access; those require the user's approval, like shell.
 
 7. memory — durable long-term memory, searchable by MEANING (semantic + keyword hybrid).
    params: { "operation": "remember" | "recall", "content": "text to store (remember)", "tags": ["optional","tags"], "importance": number 1-10 (remember, optional), "query": "search text (recall)", "topK": number (optional) }
@@ -119,16 +125,23 @@ const TOOL_REFERENCE = `Available tools and their EXACT params:
    params: { "method": "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" (default GET), "url": "absolute http(s) URL",
              "headers": { "name": "value" } (optional), "body": "string (POST/PUT/PATCH)", "timeoutMs": number (optional) }
 
-10. note — record durable task state in working memory (shown back to you every turn): facts discovered, constraints, named variables. Use it for things you must not forget mid-task.
+10. plugin — run an installed user plugin in the JS sandbox (no filesystem/network access).
+   params: { "name": "the plugin's name", "params": { ...arguments matching the plugin's schema } }
+${renderPluginList(loadPlugins().plugins)
+  .split("\n")
+  .map((line) => `   ${line}`)
+  .join("\n")}
+
+11. note — record durable task state in working memory (shown back to you every turn): facts discovered, constraints, named variables. Use it for things you must not forget mid-task.
    params: { "facts": ["..."], "constraints": ["..."], "variables": { "name": "value" } } (all optional)
 
-11. update_plan — report progress on a phase (alternative to the "progress" field).
+12. update_plan — report progress on a phase (alternative to the "progress" field).
    params: { "phase": number, "status": "in_progress" | "completed" | "failed", "finding": "short note (optional)" }
 
-12. done — the task is fully complete. Put the final answer to the user in "message".
+13. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-13. stuck — you cannot proceed without the user. Explain what you need in "message".
+14. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -165,7 +178,7 @@ If you have been given tools (function calling), CALL a tool — the tool name i
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
-  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | note | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | plugin | note | done | stuck",
   "params": { ... },
   "message": "what to show the user (optional)",
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }

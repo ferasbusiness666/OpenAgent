@@ -1,9 +1,31 @@
 import path from "node:path";
 import fs from "fs-extra";
 import { chromium } from "playwright";
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 import { getConfig, resolveWorkspacePath } from "../config/index.js";
 import { checkUrlAllowed } from "../util/net-guard.js";
+import { resolveWorkspaceRelative } from "../util/sandbox.js";
+
+/** One captured response in the network ring buffer (see {@link BrowserTool.network}). */
+interface NetworkEntry {
+  method: string;
+  url: string;
+  status: number;
+  resourceType: string;
+  at: number;
+}
+
+/** A single cookie accepted by {@link BrowserTool.setCookies}, after validation. */
+interface ValidatedCookie {
+  name: string;
+  value: string;
+  url?: string;
+  domain?: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+}
 
 // Cached result of the chromium-binary check (the path never changes at runtime).
 let browserAvailableCache: boolean | null = null;
@@ -40,18 +62,84 @@ export const BROWSER_UNAVAILABLE_MESSAGE =
  */
 export class BrowserTool {
   private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
 
-  /** Ensure a live browser + page exist, launching them if necessary. */
+  /**
+   * Always-on ring buffer of recent network responses, surfaced by
+   * {@link network}. Capped at {@link NETWORK_BUFFER_CAP} entries (oldest
+   * dropped) so a long-lived page can never grow it without bound.
+   */
+  private networkLog: NetworkEntry[] = [];
+
+  /**
+   * Pages that already have the "response" listener attached. A page is created
+   * inside {@link ensurePage} on first use and again after every crash-recovery
+   * relaunch, so we guard against double-attachment per page instance (the set
+   * holds weak references, so closed/GC'd pages drop out automatically).
+   */
+  private readonly listenedPages = new WeakSet<Page>();
+
+  /** Maximum entries retained in the network ring buffer. */
+  private static readonly NETWORK_BUFFER_CAP = 200;
+
+  /** Character cap applied to serialized output of getCookies / injectJs. */
+  private static readonly OUTPUT_CAP = 4_000;
+
+  /** Maximum download body size accepted by {@link download} (50 MB). */
+  private static readonly MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+
+  /**
+   * Ensure a live browser + explicit context + page exist, launching them if
+   * necessary. We create an explicit BrowserContext (rather than relying on the
+   * implicit one behind browser.newPage()) so cookie operations have a context
+   * handle to read from / write to. The "response" listener that feeds the
+   * network ring buffer is (re)attached every time a page is created — including
+   * after a crash-recovery relaunch — and guarded against double-attachment.
+   */
   private async ensurePage(): Promise<Page> {
     if (this.browser === null || !this.browser.isConnected()) {
       this.browser = await chromium.launch({ headless: true });
+      this.context = null;
+      this.page = null;
+    }
+    if (this.context === null) {
+      this.context = await this.browser.newContext();
       this.page = null;
     }
     if (this.page === null || this.page.isClosed()) {
-      this.page = await this.browser.newPage();
+      this.page = await this.context.newPage();
     }
-    return this.page;
+    const page = this.page;
+    if (!this.listenedPages.has(page)) {
+      this.listenedPages.add(page);
+      page.on("response", (response) => {
+        try {
+          const request = response.request();
+          this.recordNetwork({
+            method: request.method(),
+            url: response.url(),
+            status: response.status(),
+            resourceType: request.resourceType(),
+            at: Date.now(),
+          });
+        } catch {
+          // A response can race with teardown; dropping one entry is harmless.
+        }
+      });
+    }
+    return page;
+  }
+
+  /** Append a network entry, dropping the oldest once the cap is exceeded. */
+  private recordNetwork(entry: NetworkEntry): void {
+    this.networkLog.push(entry);
+    if (this.networkLog.length > BrowserTool.NETWORK_BUFFER_CAP) {
+      this.networkLog.splice(
+        0,
+        this.networkLog.length - BrowserTool.NETWORK_BUFFER_CAP,
+      );
+    }
   }
 
   /** Tear down the browser so the next operation relaunches it cleanly. */
@@ -64,7 +152,9 @@ export class BrowserTool {
       }
     }
     this.browser = null;
+    this.context = null;
     this.page = null;
+    this.networkLog = [];
   }
 
   /**
@@ -115,6 +205,9 @@ export class BrowserTool {
     if (!check.allowed) {
       throw new Error(check.reason ?? `Blocked URL: ${url}`);
     }
+    // A navigation starts a fresh browsing session — drop captured network
+    // activity so network() describes only what happens from here on.
+    this.networkLog = [];
     return await this.withRetry("navigate", async (page) => {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
       const finalUrl = page.url();
@@ -277,6 +370,283 @@ export class BrowserTool {
       }
     }
     this.browser = null;
+    this.context = null;
     this.page = null;
+    this.networkLog = [];
+  }
+
+  /**
+   * Set cookies on the current browser context from a JSON array of cookie
+   * objects. Each entry needs a non-empty `name` and string `value`; a cookie
+   * must carry EITHER a `url` OR a `domain` (when only a domain is given, `path`
+   * defaults to "/"). Optional `expires` (unix seconds), `httpOnly`, and
+   * `secure` are passed through. Validation runs before any cookie is applied,
+   * so a malformed entry rejects the whole batch with a clear message — cookie
+   * VALUES are never echoed in errors (only names / indices).
+   */
+  async setCookies(cookiesJson: string): Promise<string> {
+    if (typeof cookiesJson !== "string" || cookiesJson.trim().length === 0) {
+      throw new Error("setCookies requires a non-empty JSON string.");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cookiesJson);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`setCookies: invalid JSON — ${detail}`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error("setCookies: expected a JSON array of cookie objects.");
+    }
+
+    const cookies: ValidatedCookie[] = [];
+    const problems: string[] = [];
+
+    parsed.forEach((raw, index) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        problems.push(`#${index}: not an object`);
+        return;
+      }
+      const c = raw as Record<string, unknown>;
+      const where = `#${index}`;
+
+      if (typeof c.name !== "string" || c.name.length === 0) {
+        problems.push(`${where}: missing/invalid "name"`);
+        return;
+      }
+      const name = c.name;
+      if (typeof c.value !== "string") {
+        problems.push(`${where} ("${name}"): missing/invalid "value" (must be a string)`);
+        return;
+      }
+
+      const hasUrl = typeof c.url === "string" && c.url.length > 0;
+      const hasDomain = typeof c.domain === "string" && c.domain.length > 0;
+      if (!hasUrl && !hasDomain) {
+        problems.push(`${where} ("${name}"): needs either "url" or "domain"`);
+        return;
+      }
+
+      const cookie: ValidatedCookie = { name, value: c.value };
+
+      if (hasUrl) {
+        cookie.url = c.url as string;
+      }
+      if (hasDomain) {
+        cookie.domain = c.domain as string;
+        // Per the spec: a domain cookie requires a path; default to "/".
+        if (typeof c.path === "string" && c.path.length > 0) {
+          cookie.path = c.path;
+        } else {
+          cookie.path = "/";
+        }
+      } else if (typeof c.path === "string" && c.path.length > 0) {
+        cookie.path = c.path;
+      }
+
+      if (c.expires !== undefined) {
+        if (typeof c.expires !== "number" || !Number.isFinite(c.expires)) {
+          problems.push(`${where} ("${name}"): "expires" must be a finite number`);
+          return;
+        }
+        cookie.expires = c.expires;
+      }
+      if (c.httpOnly !== undefined) {
+        if (typeof c.httpOnly !== "boolean") {
+          problems.push(`${where} ("${name}"): "httpOnly" must be a boolean`);
+          return;
+        }
+        cookie.httpOnly = c.httpOnly;
+      }
+      if (c.secure !== undefined) {
+        if (typeof c.secure !== "boolean") {
+          problems.push(`${where} ("${name}"): "secure" must be a boolean`);
+          return;
+        }
+        cookie.secure = c.secure;
+      }
+
+      cookies.push(cookie);
+    });
+
+    if (problems.length > 0) {
+      throw new Error(`setCookies: invalid cookie(s): ${problems.join("; ")}`);
+    }
+    if (cookies.length === 0) {
+      throw new Error("setCookies: no cookies provided.");
+    }
+
+    return await this.withRetry("setCookies", async () => {
+      // ensurePage (run by withRetry) guarantees the context exists.
+      if (this.context === null) {
+        throw new Error("setCookies: browser context is unavailable.");
+      }
+      await this.context.addCookies(cookies);
+      return `Set ${cookies.length} cookie(s).`;
+    });
+  }
+
+  /**
+   * Return the cookies on the current browser context as pretty-printed JSON,
+   * capped at {@link OUTPUT_CAP} characters with a truncation note. Reports
+   * "(no cookies)" when the context holds none.
+   */
+  async getCookies(): Promise<string> {
+    return await this.withRetry("getCookies", async () => {
+      if (this.context === null) {
+        throw new Error("getCookies: browser context is unavailable.");
+      }
+      const cookies = await this.context.cookies();
+      if (cookies.length === 0) {
+        return "(no cookies)";
+      }
+      const json = JSON.stringify(cookies, null, 2);
+      const cap = BrowserTool.OUTPUT_CAP;
+      if (json.length <= cap) {
+        return json;
+      }
+      return (
+        json.slice(0, cap) +
+        `\n... (output truncated at ${cap} chars; ${cookies.length} cookie(s) total)`
+      );
+    });
+  }
+
+  /**
+   * Evaluate a JavaScript snippet inside the current page and return its result
+   * serialized as JSON (capped at {@link OUTPUT_CAP} chars). The script runs in
+   * the page's own Chromium sandbox — it can only touch that page, the same
+   * accepted risk model as click/type. The snippet is evaluated as an
+   * expression-or-body by Playwright, so a trailing expression (or `return`
+   * inside a function body) becomes the result; `undefined` reports
+   * "(no return value)". Errors thrown inside the page bubble up as a readable
+   * Error message.
+   */
+  async injectJs(script: string): Promise<string> {
+    if (typeof script !== "string" || script.trim().length === 0) {
+      throw new Error("injectJs requires a non-empty script string.");
+    }
+    return await this.withRetry("injectJs", async (page) => {
+      let result: unknown;
+      try {
+        result = await page.evaluate(script);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`injectJs: page evaluation failed — ${detail}`);
+      }
+      if (result === undefined) {
+        return "(no return value)";
+      }
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(result);
+      } catch {
+        serialized = String(result);
+      }
+      if (serialized === undefined) {
+        return "(no return value)";
+      }
+      const cap = BrowserTool.OUTPUT_CAP;
+      if (serialized.length <= cap) {
+        return serialized;
+      }
+      return serialized.slice(0, cap) + `\n... (output truncated at ${cap} chars)`;
+    });
+  }
+
+  /**
+   * Download a URL to a file inside the workspace using the PAGE's request
+   * context, so the current session's cookies are applied. The URL is SSRF-
+   * screened and the destination is confined to the workspace. Bodies over
+   * {@link MAX_DOWNLOAD_BYTES} (50 MB) are rejected — checked against the
+   * content-length header up front AND the actual body length. Non-2xx
+   * responses throw with the status.
+   */
+  async download(url: string, savePath: string): Promise<string> {
+    if (typeof url !== "string" || url.trim().length === 0) {
+      throw new Error("download requires a non-empty url.");
+    }
+    if (typeof savePath !== "string" || savePath.trim().length === 0) {
+      throw new Error("download requires a non-empty savePath.");
+    }
+
+    const allowLocal = getConfig().allowLocalNetworkAccess;
+    const check = await checkUrlAllowed(url, { allowLocal });
+    if (!check.allowed) {
+      throw new Error(check.reason ?? `Blocked URL: ${url}`);
+    }
+
+    const workspace = path.resolve(resolveWorkspacePath(getConfig()));
+    const destination = resolveWorkspaceRelative(savePath, workspace, "browser");
+
+    const maxBytes = BrowserTool.MAX_DOWNLOAD_BYTES;
+
+    return await this.withRetry("download", async (page) => {
+      const response = await page.request.get(url, {
+        timeout: 60_000,
+        maxRedirects: 5,
+      });
+      const status = response.status();
+      if (status < 200 || status >= 300) {
+        throw new Error(`download: server returned HTTP ${status} for ${url}`);
+      }
+
+      const declared = response.headers()["content-length"];
+      if (declared !== undefined) {
+        const declaredBytes = Number(declared);
+        if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+          throw new Error(
+            `download: response is ${declaredBytes} bytes, exceeding the ` +
+              `${maxBytes}-byte (50 MB) limit.`,
+          );
+        }
+      }
+
+      const body = await response.body();
+      if (body.length > maxBytes) {
+        throw new Error(
+          `download: downloaded ${body.length} bytes, exceeding the ` +
+            `${maxBytes}-byte (50 MB) limit.`,
+        );
+      }
+
+      await fs.ensureDir(path.dirname(destination));
+      await fs.writeFile(destination, body);
+      return `Downloaded ${body.length} bytes to "${savePath}" (HTTP ${status}).`;
+    });
+  }
+
+  /**
+   * Return recent network activity captured by the always-on ring buffer
+   * (newest last). Without a filter the most recent 50 entries are shown; with
+   * one, entries are filtered by a case-insensitive match on the URL — the
+   * filter is tried as a regular expression first and falls back to a plain
+   * substring match if it is not valid regex. Synchronous: it reads the
+   * in-memory buffer only and never touches the page.
+   */
+  network(filter?: string): string {
+    let entries = this.networkLog;
+
+    const pattern = typeof filter === "string" ? filter.trim() : "";
+    if (pattern.length > 0) {
+      let test: (url: string) => boolean;
+      try {
+        const regex = new RegExp(pattern, "i");
+        test = (url) => regex.test(url);
+      } catch {
+        const needle = pattern.toLowerCase();
+        test = (url) => url.toLowerCase().includes(needle);
+      }
+      entries = entries.filter((e) => test(e.url));
+    }
+
+    if (entries.length === 0) {
+      return "(no captured network activity)";
+    }
+
+    const recent = entries.slice(-50);
+    return recent
+      .map((e) => `${e.method} ${e.url} -> ${e.status} (${e.resourceType})`)
+      .join("\n");
   }
 }

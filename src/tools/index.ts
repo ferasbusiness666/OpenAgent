@@ -3,8 +3,18 @@ import type { ShellResult } from "./shell.js";
 import { FilesystemTool } from "./filesystem.js";
 import type { FilesystemOperation } from "./filesystem.js";
 import { BrowserTool, isBrowserAvailable, BROWSER_UNAVAILABLE_MESSAGE } from "./browser.js";
-import { CodeTool, SUPPORTED_LANGUAGES, type CodeLanguage } from "./code.js";
+import {
+  CodeTool,
+  SUPPORTED_LANGUAGES,
+  SUPPORTED_PACKAGE_MANAGERS,
+  SUPPORTED_TEST_FRAMEWORKS,
+  type CodeLanguage,
+  type PackageManager,
+  type TestFramework,
+} from "./code.js";
 import { ServeTool } from "./serve.js";
+import { executePlugin, loadPlugins } from "../plugins/index.js";
+import { getActiveWorkspace } from "../config/index.js";
 import { HttpTool, type HttpMethod, type HttpRequestOptions } from "./http.js";
 import { ResearchTool } from "./research.js";
 import { LongTermMemory, type RecallHit } from "../memory/longterm.js";
@@ -52,7 +62,12 @@ export type BrowserOperation =
   | "waitFor"
   | "scroll"
   | "readText"
-  | "press";
+  | "press"
+  | "setCookies"
+  | "getCookies"
+  | "injectJs"
+  | "download"
+  | "network";
 
 /** Validated parameter shape for the browser tool. */
 export interface BrowserParams {
@@ -66,6 +81,14 @@ export interface BrowserParams {
   target?: string;
   /** Timeout in milliseconds for the "waitFor" operation. */
   timeout?: number;
+  /** JSON array of cookies for "setCookies". */
+  cookies?: string;
+  /** JavaScript source for "injectJs". */
+  script?: string;
+  /** Workspace-relative save path for "download". */
+  path?: string;
+  /** Optional URL filter (substring or regex) for "network". */
+  filter?: string;
 }
 
 /** Uniform result returned for every tool invocation. */
@@ -73,6 +96,75 @@ export interface ToolResult {
   success: boolean;
   result: string;
   error?: string;
+}
+
+/** Per-invocation options for executeTool. */
+export interface ExecuteOptions {
+  /** IMP-15: receives incremental output chunks while the tool runs (currently
+   *  the shell tool streams; others complete atomically). */
+  onChunk?: (chunk: string) => void;
+}
+
+// ---- IMP-16: in-session cache for read-only filesystem results ---------------
+//
+// Identical reads (read/list/grep/find/diff with identical params) within one
+// session are served from an LRU cache instead of re-walking the disk. The
+// cache is invalidated whenever anything that can change files runs: a
+// filesystem mutation, any shell command, any code execution, or a browser
+// download/screenshot. Conservative by design — correctness over hit rate.
+
+const CACHEABLE_FS_OPS: readonly string[] = ["read", "list", "grep", "find", "diff"];
+const RESULT_CACHE_CAP = 50;
+const resultCache = new Map<string, string>();
+
+/** Deterministic cache key for a tool invocation (sorted-key stringify). The
+ *  active workspace is part of the key so a mid-session workspace switch can
+ *  never serve another project's file contents. */
+function cacheKey(name: string, params: Record<string, unknown>): string {
+  const sorted = (value: unknown): string => {
+    if (value === null || typeof value !== "object") {
+      return JSON.stringify(value) ?? "null";
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map(sorted).join(",")}]`;
+    }
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${sorted(obj[k])}`)
+      .join(",")}}`;
+  };
+  return `${getActiveWorkspace()}|${name}:${sorted(params)}`;
+}
+
+/** True when this invocation may be served from / stored in the cache. */
+function isCacheable(name: string, params: Record<string, unknown>): boolean {
+  return (
+    name === "filesystem" &&
+    typeof params.operation === "string" &&
+    CACHEABLE_FS_OPS.includes(params.operation)
+  );
+}
+
+/** True when this invocation may have CHANGED files → drop the whole cache. */
+function invalidatesCache(name: string, params: Record<string, unknown>): boolean {
+  if (name === "shell" || name === "code" || name === "serve") {
+    return true;
+  }
+  if (name === "filesystem") {
+    const op = typeof params.operation === "string" ? params.operation : "";
+    return op === "write" || op === "delete" || op === "mkdir";
+  }
+  if (name === "browser") {
+    const op = typeof params.operation === "string" ? params.operation : "";
+    return op === "screenshot" || op === "download";
+  }
+  return false;
+}
+
+/** Test hook: clear the read-result cache (also used on workspace switches). */
+export function clearToolResultCache(): void {
+  resultCache.clear();
 }
 
 /**
@@ -128,6 +220,7 @@ const TOOL_NAMES = [
   "memory",
   "serve",
   "http",
+  "plugin",
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -259,6 +352,11 @@ const BROWSER_OPS: readonly BrowserOperation[] = [
   "scroll",
   "readText",
   "press",
+  "setCookies",
+  "getCookies",
+  "injectJs",
+  "download",
+  "network",
 ];
 
 function parseBrowserParams(
@@ -283,9 +381,36 @@ function parseBrowserParams(
   if (target !== null) result.target = target;
   const timeout = asNumber(params.timeout);
   if (timeout !== null) result.timeout = timeout;
+  // Cookies arrive as a JSON string OR as a structured array — normalize.
+  const cookies = asString(params.cookies);
+  if (cookies !== null) {
+    result.cookies = cookies;
+  } else if (Array.isArray(params.cookies) || (typeof params.cookies === "object" && params.cookies !== null)) {
+    result.cookies = JSON.stringify(params.cookies);
+  }
+  const script = asString(params.script);
+  if (script !== null) result.script = script;
+  const dlPath = asString(params.path);
+  if (dlPath !== null) result.path = dlPath;
+  const filter = asString(params.filter);
+  if (filter !== null) result.filter = filter;
 
   if (op === "navigate" && result.url === undefined) {
     return 'browser "navigate" requires a string "url" parameter.';
+  }
+  if (op === "setCookies" && (result.cookies === undefined || result.cookies.trim().length === 0)) {
+    return 'browser "setCookies" requires a "cookies" parameter (a JSON array of cookie objects).';
+  }
+  if (op === "injectJs" && (result.script === undefined || result.script.trim().length === 0)) {
+    return 'browser "injectJs" requires a non-empty string "script" parameter.';
+  }
+  if (op === "download") {
+    if (result.url === undefined || result.url.trim().length === 0) {
+      return 'browser "download" requires a string "url" parameter.';
+    }
+    if (result.path === undefined || result.path.trim().length === 0) {
+      return 'browser "download" requires a workspace-relative string "path" parameter.';
+    }
   }
   if ((op === "click" || op === "type") && result.selector === undefined) {
     return `browser "${op}" requires a string "selector" parameter.`;
@@ -420,15 +545,68 @@ function parseResearchParams(
   return out;
 }
 
+/** Operations the code tool supports (IMP-13 adds installDeps/runTests). */
+export type CodeOperation = "run" | "installDeps" | "runTests";
+
 /** Validated parameter shape for the code tool. */
 export interface CodeParams {
+  operation: CodeOperation;
   language: CodeLanguage;
   code?: string;
   tasks?: string[];
   timeoutMs?: number;
+  packageManager?: PackageManager;
+  packages?: string[];
+  framework?: TestFramework;
+  path?: string;
 }
 
 function parseCodeParams(params: Record<string, unknown>): CodeParams | string {
+  const rawOp = asString(params.operation) ?? "run";
+  if (rawOp !== "run" && rawOp !== "installDeps" && rawOp !== "runTests") {
+    return 'code "operation" must be "run", "installDeps", or "runTests".';
+  }
+
+  if (rawOp === "installDeps") {
+    const pm = asString(params.packageManager);
+    if (pm === null || !(SUPPORTED_PACKAGE_MANAGERS as readonly string[]).includes(pm)) {
+      return `code "installDeps" requires "packageManager" to be one of: ${SUPPORTED_PACKAGE_MANAGERS.join(", ")}.`;
+    }
+    const packages = asStringArray(params.packages);
+    if (packages === null) {
+      return 'code "installDeps" requires a non-empty "packages" array of package names.';
+    }
+    const out: CodeParams = {
+      operation: "installDeps",
+      language: "js",
+      packageManager: pm as PackageManager,
+      packages,
+    };
+    const timeoutMs = asNumber(params.timeoutMs);
+    if (timeoutMs !== null) out.timeoutMs = Math.max(50, Math.round(timeoutMs));
+    return out;
+  }
+
+  if (rawOp === "runTests") {
+    const framework = asString(params.framework);
+    if (
+      framework === null ||
+      !(SUPPORTED_TEST_FRAMEWORKS as readonly string[]).includes(framework)
+    ) {
+      return `code "runTests" requires "framework" to be one of: ${SUPPORTED_TEST_FRAMEWORKS.join(", ")}.`;
+    }
+    const out: CodeParams = {
+      operation: "runTests",
+      language: "js",
+      framework: framework as TestFramework,
+    };
+    const testPath = asString(params.path);
+    if (testPath !== null && testPath.trim().length > 0) out.path = testPath;
+    const timeoutMs = asNumber(params.timeoutMs);
+    if (timeoutMs !== null) out.timeoutMs = Math.max(50, Math.round(timeoutMs));
+    return out;
+  }
+
   const code = asString(params.code) ?? undefined;
   const tasks = asStringArray(params.tasks) ?? undefined;
   if (code === undefined && tasks === undefined) {
@@ -439,12 +617,33 @@ function parseCodeParams(params: Record<string, unknown>): CodeParams | string {
     return `code "language" must be one of: ${SUPPORTED_LANGUAGES.join(", ")}.`;
   }
   const language = (rawLang ?? "js") as CodeLanguage;
-  const out: CodeParams = { language };
+  const out: CodeParams = { operation: "run", language };
   if (code !== undefined) out.code = code;
   if (tasks !== undefined) out.tasks = tasks;
   const timeoutMs = asNumber(params.timeoutMs);
   if (timeoutMs !== null) out.timeoutMs = Math.max(50, Math.round(timeoutMs));
   return out;
+}
+
+/** Validated parameter shape for the plugin tool (IMP-30). */
+export interface PluginParams {
+  name: string;
+  params: Record<string, unknown>;
+}
+
+function parsePluginParams(params: Record<string, unknown>): PluginParams | string {
+  const name = asString(params.name);
+  if (name === null || name.trim().length === 0) {
+    const installed = loadPlugins().plugins.map((p) => p.name);
+    return `plugin requires a string "name" parameter. Installed plugins: ${
+      installed.length > 0 ? installed.join(", ") : "(none)"
+    }.`;
+  }
+  const inner =
+    params.params !== null && typeof params.params === "object" && !Array.isArray(params.params)
+      ? (params.params as Record<string, unknown>)
+      : {};
+  return { name: name.trim(), params: inner };
 }
 
 /** Validated parameter shape for the serve tool. */
@@ -588,6 +787,19 @@ async function dispatchBrowser(p: BrowserParams): Promise<string> {
     case "press":
       // key presence guaranteed by parseBrowserParams.
       return await b.press(p.key as string);
+    case "setCookies":
+      // cookies presence guaranteed by parseBrowserParams.
+      return await b.setCookies(p.cookies as string);
+    case "getCookies":
+      return await b.getCookies();
+    case "injectJs":
+      // script presence guaranteed by parseBrowserParams.
+      return await b.injectJs(p.script as string);
+    case "download":
+      // url + path presence guaranteed by parseBrowserParams.
+      return await b.download(p.url as string, p.path as string);
+    case "network":
+      return b.network(p.filter);
   }
 }
 
@@ -628,9 +840,34 @@ async function dispatchFilesystem(p: FilesystemParams): Promise<string> {
 export async function executeTool(
   name: string,
   params: Record<string, unknown>,
+  options?: ExecuteOptions,
 ): Promise<ToolResult> {
   const safeParams = params !== null && typeof params === "object" ? params : {};
-  const result = await executeToolInner(name, safeParams);
+
+  // IMP-16: serve identical read-only filesystem calls from the session cache.
+  const cacheable = isCacheable(name, safeParams);
+  if (cacheable) {
+    const hit = resultCache.get(cacheKey(name, safeParams));
+    if (hit !== undefined) {
+      appendAuditEntry(name, safeParams, true, "(cache hit) " + hit);
+      return { success: true, result: hit };
+    }
+  }
+
+  const result = await executeToolInner(name, safeParams, options);
+
+  if (result.success && cacheable) {
+    resultCache.set(cacheKey(name, safeParams), result.result);
+    while (resultCache.size > RESULT_CACHE_CAP) {
+      const oldest = resultCache.keys().next().value;
+      if (oldest === undefined) break;
+      resultCache.delete(oldest);
+    }
+  }
+  if (invalidatesCache(name, safeParams)) {
+    resultCache.clear();
+  }
+
   appendAuditEntry(
     name,
     safeParams,
@@ -643,6 +880,7 @@ export async function executeTool(
 async function executeToolInner(
   name: string,
   params: Record<string, unknown>,
+  options?: ExecuteOptions,
 ): Promise<ToolResult> {
   try {
     if (!isToolName(name)) {
@@ -661,7 +899,7 @@ async function executeToolInner(
       if (typeof parsed === "string") {
         return { success: false, result: "", error: parsed };
       }
-      const r = await registry.shell.run(parsed.command);
+      const r = await registry.shell.run(parsed.command, options?.onChunk);
       return { success: true, result: formatShellResult(r) };
     }
 
@@ -722,10 +960,35 @@ async function executeToolInner(
       if (typeof parsed === "string") {
         return { success: false, result: "", error: parsed };
       }
+      if (parsed.operation === "installDeps") {
+        const result = await registry.code.installDeps(
+          parsed.packageManager ?? "npm",
+          parsed.packages ?? [],
+          parsed.timeoutMs,
+        );
+        return { success: true, result };
+      }
+      if (parsed.operation === "runTests") {
+        const result = await registry.code.runTests(
+          parsed.framework ?? "jest",
+          parsed.path,
+          parsed.timeoutMs,
+        );
+        return { success: true, result };
+      }
       const result =
         parsed.tasks !== undefined && parsed.tasks.length > 0
           ? await registry.code.runMany(parsed.tasks, parsed.timeoutMs)
           : await registry.code.run(parsed.language, parsed.code ?? "", parsed.timeoutMs);
+      return { success: true, result };
+    }
+
+    if (name === "plugin") {
+      const parsed = parsePluginParams(safeParams);
+      if (typeof parsed === "string") {
+        return { success: false, result: "", error: parsed };
+      }
+      const result = await executePlugin(parsed.name, parsed.params);
       return { success: true, result };
     }
 

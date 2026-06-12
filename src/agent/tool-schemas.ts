@@ -12,6 +12,7 @@
  */
 
 import type { ToolSchema } from "../providers/messages.js";
+import { loadPlugins, renderPluginList } from "../plugins/index.js";
 
 /** Convenience for a JSON-Schema object with the given properties. */
 function obj(
@@ -68,19 +69,27 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
   },
   {
     name: "browser",
-    description: "Drive a headless Chromium browser for web tasks.",
+    description:
+      "Drive a headless Chromium browser: navigation/clicking/typing, cookies (login sessions), JS injection, session-aware downloads, and a recent-network log.",
     parameters: obj(
       {
         operation: {
           type: "string",
-          enum: ["navigate", "click", "type", "screenshot", "extractText", "readText", "getHtml", "waitFor", "scroll", "press"],
+          enum: [
+            "navigate", "click", "type", "screenshot", "extractText", "readText", "getHtml",
+            "waitFor", "scroll", "press", "setCookies", "getCookies", "injectJs", "download", "network",
+          ],
         },
-        url: str("URL (navigate)"),
+        url: str("URL (navigate/download)"),
         selector: str("CSS selector (click/type/waitFor)"),
         text: str("text to type (type)"),
         key: str("key to press, e.g. Enter (press)"),
         target: str("bottom|top|down|up (scroll)"),
         timeout: num("timeout in ms (waitFor)"),
+        cookies: str("JSON array of cookie objects (setCookies)"),
+        script: str("JavaScript to evaluate in the page; its value is returned (injectJs)"),
+        path: str("workspace-relative save path (download)"),
+        filter: str("URL substring/regex filter (network)"),
       },
       ["operation"],
     ),
@@ -120,15 +129,34 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
   },
   {
     name: "code",
-    description: "Run code in a sandboxed worker. js runs in an isolated vm; python/node/bash/powershell run via the local interpreter (approval-gated).",
+    description:
+      "Run code in a sandboxed worker (js = isolated vm; python/node/bash/powershell via local interpreters, approval-gated), install dependencies (operation installDeps), or run a test suite (operation runTests — pytest/jest/mocha/vitest/go).",
     parameters: obj(
       {
+        operation: { type: "string", enum: ["run", "installDeps", "runTests"], description: "default run" },
         language: { type: "string", enum: ["js", "python", "node", "bash", "powershell"] },
-        code: str("the source to run"),
+        code: str("the source to run (run)"),
         tasks: { type: "array", items: { type: "string" }, description: "several JS snippets to run in parallel" },
+        packageManager: { type: "string", enum: ["npm", "pip"], description: "installDeps" },
+        packages: { type: "array", items: { type: "string" }, description: "package names (installDeps)" },
+        framework: { type: "string", enum: ["pytest", "jest", "mocha", "vitest", "go"], description: "runTests" },
+        path: str("test file/dir (runTests, optional)"),
         timeoutMs: num("timeout in ms"),
       },
       [],
+    ),
+  },
+  {
+    name: "plugin",
+    description:
+      "Run an installed user plugin inside the JS sandbox (pure compute — no filesystem/network). Installed plugins:\n" +
+      renderPluginList(loadPlugins().plugins),
+    parameters: obj(
+      {
+        name: str("the plugin's name"),
+        params: { type: "object", description: "arguments matching the plugin's schema" },
+      },
+      ["name"],
     ),
   },
   {

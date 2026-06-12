@@ -22,6 +22,7 @@ import { Corrector } from "./corrector.js";
 import { UsageTracker, type SessionUsage } from "./usage.js";
 import { WorkingMemory } from "./working-memory.js";
 import { LongTermMemory } from "../memory/longterm.js";
+import { Tracer } from "../trace.js";
 import { extractJsonObject } from "../util/json.js";
 import { randomUUID } from "node:crypto";
 
@@ -73,6 +74,7 @@ const TOOL_ACTIONS = [
   "memory",
   "serve",
   "http",
+  "plugin",
 ] as const;
 type ToolAction = (typeof TOOL_ACTIONS)[number];
 
@@ -147,6 +149,9 @@ export interface AgentEvents {
   usage: (totals: SessionUsage) => void;
   /** Emitted on every FSM transition (IMP-01). */
   stateChange: (state: LoopState) => void;
+  /** IMP-15: incremental output from a streaming tool (currently shell) while
+   *  it runs. The UI buffers these into ~150ms state updates. */
+  toolChunk: (data: { tool: string; chunk: string }) => void;
 }
 
 /** Optional collaborators and resume state for an AgentLoop. */
@@ -224,6 +229,8 @@ export class AgentLoop extends EventEmitter {
   private readonly workingMemory: WorkingMemory;
   // IMP-09: durable store for success patterns (and the memory tool's notes).
   private readonly longTerm: LongTermMemory;
+  // IMP-24: per-session span log (~/.openagent/traces/<sessionId>.jsonl).
+  private readonly tracer: Tracer;
 
   constructor(
     provider: Provider,
@@ -245,6 +252,7 @@ export class AgentLoop extends EventEmitter {
     this.phases = options?.phases ?? [];
     this.workingMemory = WorkingMemory.from(options?.workingMemory);
     this.longTerm = options?.longTermMemory ?? new LongTermMemory();
+    this.tracer = new Tracer(this.sessionId);
   }
 
   /** True while a run() is in progress (used by the Telegram queue). */
@@ -299,6 +307,7 @@ export class AgentLoop extends EventEmitter {
   /** Transition the FSM and notify listeners (IMP-01). */
   private setState(state: LoopState): void {
     this.loopState = state;
+    this.tracer.event("state", { phase: state.phase });
     this.emit("stateChange", state);
   }
 
@@ -609,11 +618,21 @@ export class AgentLoop extends EventEmitter {
     this.pendingImages = [];
 
     let result: GenerateResult;
+    const span = this.tracer.startSpan("provider.generate", {
+      provider: this.provider.name,
+      iteration: ctx.iterationsUsed,
+    });
     try {
       result = await this.provider.generate(request);
     } catch (err) {
+      span.end({ error: errMessage(err) });
       return { phase: "error", message: `Provider call failed: ${errMessage(err)}` };
     }
+    span.end({
+      tokensIn: result.usage?.inputTokens ?? 0,
+      tokensOut: result.usage?.outputTokens ?? 0,
+      toolCalls: result.toolCalls.length,
+    });
     this.trackUsage(result);
 
     // ---- Resolve the turn: native tool call(s), else parsed JSON text --------
@@ -775,7 +794,15 @@ export class AgentLoop extends EventEmitter {
             ? a.params.language
             : "js"
           : null;
-      const isRiskyCode = codeLang !== null && codeLang !== "js";
+      const codeOp =
+        a.action === "code" && typeof a.params.operation === "string"
+          ? a.params.operation
+          : "run";
+      // installDeps/runTests shell out to npm/pip/test runners — same risk
+      // class as shell, so they go through the same approval gate.
+      const isRiskyCode =
+        a.action === "code" &&
+        ((codeLang !== null && codeLang !== "js") || codeOp === "installDeps" || codeOp === "runTests");
       if (
         cfg.requireCommandApproval &&
         this.approvalHandler &&
@@ -786,7 +813,9 @@ export class AgentLoop extends EventEmitter {
             ? typeof a.params.command === "string"
               ? a.params.command
               : stableStringify(a.params)
-            : `${codeLang}: ${typeof a.params.code === "string" ? a.params.code : stableStringify(a.params)}`;
+            : codeOp !== "run"
+              ? `${codeOp}: ${stableStringify(a.params)}`
+              : `${codeLang}: ${typeof a.params.code === "string" ? a.params.code : stableStringify(a.params)}`;
         let approved = false;
         try {
           approved = await this.approvalHandler({ tool: a.action, summary });
@@ -814,13 +843,19 @@ export class AgentLoop extends EventEmitter {
     const runnable = slots.filter((s) => s.blockedNote === undefined);
     const browserSlots = runnable.filter((s) => s.action.action === "browser");
     const parallelSlots = runnable.filter((s) => s.action.action !== "browser");
-    const work: Promise<void>[] = parallelSlots.map(async (s) => {
-      s.result = await executeTool(s.action.action, s.action.params);
-    });
+    // IMP-15 + IMP-24: stream incremental output to the UI and trace each run.
+    const runOne = async (s: (typeof slots)[number]): Promise<void> => {
+      const toolSpan = this.tracer.startSpan(`tool.${s.action.action}`);
+      s.result = await executeTool(s.action.action, s.action.params, {
+        onChunk: (chunk) => this.emit("toolChunk", { tool: s.action.action, chunk }),
+      });
+      toolSpan.end({ success: s.result.success });
+    };
+    const work: Promise<void>[] = parallelSlots.map(runOne);
     work.push(
       (async () => {
         for (const s of browserSlots) {
-          s.result = await executeTool(s.action.action, s.action.params);
+          await runOne(s);
         }
       })(),
     );

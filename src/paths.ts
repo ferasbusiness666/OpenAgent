@@ -33,6 +33,10 @@ export const MEMORY_DIR = path.join(DATA_DIR, "memory");
 export const SCHEDULES_PATH = path.join(DATA_DIR, "schedules.json");
 /** Background-run registry: one <runId>.json record + <runId>.log (JSONL) each. */
 export const RUNS_DIR = path.join(DATA_DIR, "runs");
+/** Observability traces: one <sessionId>.jsonl span log per session (IMP-24). */
+export const TRACES_DIR = path.join(DATA_DIR, "traces");
+/** User plugin directory (scanned at startup alongside ./plugins). */
+export const PLUGINS_DIR = path.join(DATA_DIR, "plugins");
 
 // This module is src/paths.ts, so the install root is one level up from src/.
 // Used only to migrate data that older builds wrote into the app folder.
@@ -45,6 +49,7 @@ export function ensureDataDir(): void {
   fs.ensureDirSync(SESSIONS_DIR);
   fs.ensureDirSync(MEMORY_DIR);
   fs.ensureDirSync(RUNS_DIR);
+  fs.ensureDirSync(TRACES_DIR);
 }
 
 /**

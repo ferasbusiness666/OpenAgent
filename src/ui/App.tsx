@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Box, Text, useInput, useApp } from "ink";
 import type { AgentLoop, ApprovalRequest } from "../agent/loop.js";
 import type { Phase } from "../agent/plan.js";
@@ -317,6 +317,12 @@ export function App({
   const [workers, setWorkers] = useState<WorkerStatus[]>([]);
   // Running session token/cost totals (fed by the loop's "usage" events).
   const [usage, setUsage] = useState<SessionUsage>(() => agentLoop.sessionUsage);
+  // IMP-15: live output of a streaming tool. Chunks land in a REF (no render),
+  // and a 150ms interval flushes them into state — Ink re-renders through React
+  // reconciliation, so pushing every raw chunk would flicker; batching doesn't.
+  const streamRef = useRef<{ tool: string; text: string } | null>(null);
+  const streamDirtyRef = useRef(false);
+  const [liveOutput, setLiveOutput] = useState<{ tool: string; text: string } | null>(null);
   // Pending shell-command approval request (onboarding Step 6 "stay in control").
   const [approval, setApproval] = useState<{ summary: string; resolve: (ok: boolean) => void } | null>(null);
   // Bumped on terminal resize purely to force a re-render (Ink reflows on it).
@@ -498,6 +504,15 @@ export function App({
     };
     const onToolResult = (data: { tool: string; result: string; success: boolean }) => {
       push({ kind: "toolResult", tool: data.tool, result: data.result, success: data.success });
+      // The tool finished — drop its live-output preview on the next flush.
+      streamRef.current = null;
+      streamDirtyRef.current = true;
+    };
+    const onToolChunk = (data: { tool: string; chunk: string }) => {
+      const prev = streamRef.current;
+      const text = ((prev?.tool === data.tool ? prev.text : "") + data.chunk).slice(-2000);
+      streamRef.current = { tool: data.tool, text };
+      streamDirtyRef.current = true;
     };
     const onMessage = (message: string) => push({ kind: "agent", text: message });
     const onDone = (finalMessage: string) => {
@@ -520,6 +535,7 @@ export function App({
     const onUsage = (totals: SessionUsage) => setUsage(totals);
 
     agentLoop.on("usage", onUsage);
+    agentLoop.on("toolChunk", onToolChunk);
     agentLoop.on("thought", onThought);
     agentLoop.on("toolCall", onToolCall);
     agentLoop.on("toolResult", onToolResult);
@@ -532,6 +548,7 @@ export function App({
 
     return () => {
       agentLoop.off("usage", onUsage);
+      agentLoop.off("toolChunk", onToolChunk);
       agentLoop.off("thought", onThought);
       agentLoop.off("toolCall", onToolCall);
       agentLoop.off("toolResult", onToolResult);
@@ -543,6 +560,20 @@ export function App({
       agentLoop.off("phaseUpdate", onPhaseUpdate);
     };
   }, [agentLoop, push]);
+
+  // IMP-15: flush buffered stream chunks into state every 150ms (only when
+  // something actually changed, so an idle interval never causes re-renders).
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!streamDirtyRef.current) {
+        return;
+      }
+      streamDirtyRef.current = false;
+      const current = streamRef.current;
+      setLiveOutput(current === null ? null : { ...current });
+    }, 150);
+    return () => clearInterval(timer);
+  }, []);
 
   // Subscribe to the worker pool so the UI reflects parallel job activity live.
   useEffect(() => {
@@ -1158,6 +1189,23 @@ export function App({
           ) : null}
         </>
       )}
+
+      {liveOutput !== null ? (
+        <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
+          <Text color="cyan" dimColor>
+            ▸ {liveOutput.tool} (live output)
+          </Text>
+          {liveOutput.text
+            .split(/\r?\n/)
+            .filter((line) => line.trim().length > 0)
+            .slice(-3)
+            .map((line, i) => (
+              <Text key={i} color="gray" dimColor wrap="truncate">
+                {line.slice(0, 200)}
+              </Text>
+            ))}
+        </Box>
+      ) : null}
 
       <StatusBar
         status={status}

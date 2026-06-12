@@ -11,6 +11,7 @@ import {
   type Config,
 } from "./config/index.js";
 import { migrateLegacyData } from "./paths.js";
+import { pruneOldTraces } from "./trace.js";
 import { runSetup } from "./setup.js";
 import { runStartupFlow } from "./startup.js";
 import { AgentMemory } from "./memory/agent-md.js";
@@ -138,6 +139,8 @@ async function main(): Promise<void> {
   // is deferred until AFTER the resume target is loaded (below), so resuming an
   // old session never races the cleanup that would delete its state file.
   migrateLegacyData();
+  // IMP-24: drop observability traces older than two weeks (best-effort).
+  pruneOldTraces();
 
   // ---- Health check (IMP-25): verify components, print the report, exit. ----
   if (options.healthCheck === true) {

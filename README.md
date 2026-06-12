@@ -15,13 +15,17 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Multi-phase planning** — before touching a tool the agent decomposes the goal into an ordered plan of phases (pending / in_progress / completed / failed) and works through them, surfacing the live plan in the UI.
 - **Resumable sessions** — full agent state (goal, plan, history) is saved as JSON under `~/.openagent/sessions/`; resume any session with `openagent --resume <sessionId>`.
 - **Runs anywhere** — install it globally and launch `openagent` in any directory; that directory becomes the agent's working folder.
-- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked, with `grep` / `find` / `diff` for cheap code search and comparison), a dedicated `http` client (no more fragile curl-via-shell), and a reusable headless Chromium browser (navigate / click / type / `readText` / `waitFor` / `scroll` / `press` / screenshot).
+- **Real tools** — cross-platform shell (sandboxed to the launch directory), filesystem (traversal-blocked, with `grep` / `find` / `diff` for cheap code search and comparison), a dedicated `http` client (no more fragile curl-via-shell), and a reusable headless Chromium browser (navigate / click / type / `readText` / `waitFor` / `scroll` / `press` / screenshot — plus **cookie management** for login sessions, **JS injection**, **session-aware downloads**, and a recent-**network log** for debugging).
+- **Live output streaming** — long-running shell commands stream their output into the UI as they run (buffered into ~150ms React state updates, so Ink renders smoothly instead of flickering); the agent still receives the complete result.
+- **Tool result caching** — identical read-only filesystem calls within a session are served from an LRU cache; anything that can change files (a write, a shell command, a code run) invalidates it. Less redundant I/O, fewer wasted tokens.
+- **Observability traces** — every run writes a span log to `~/.openagent/traces/<sessionId>.jsonl`: one line per provider call (latency + tokens), per tool execution (duration + success), and per state transition — so you can see exactly where time and tokens went. Disable with `OPENAGENT_NO_TRACE=1`; traces older than 14 days are pruned on startup.
+- **Plugin system (sandboxed)** — drop a `.js` file in `./plugins/` or `~/.openagent/plugins/` with a one-line metadata header and an `execute(params)` function, and it becomes a callable agent tool. Plugin code **never runs in the main process** — execution happens inside the same resource-limited worker sandbox as the `code` tool (no filesystem, no network, no `require`), so a malicious plugin can't touch your machine. Metadata is read statically (regex + JSON), never by importing the file.
 - **Token & cost tracking** — every API call's token usage is parsed and accumulated; the status bar shows live `in / out` tokens and the estimated cost (amber past $0.10, red past $1.00). Cap a session with `--budget <usd>` or the `budgetUsd` setting — the agent stops *before* exceeding it.
 - **SSRF protection** — the browser and http tools resolve every URL and block loopback, RFC-1918, and link-local/metadata addresses (DNS-checked, not just literal IPs). The agent's own `serve` previews on localhost stay exempt, and `allowLocalNetworkAccess` opts back in for LAN automation.
 - **Audit log** — every tool execution (operation + path/command, never file contents or secrets) is appended to `~/.openagent/audit.log` as JSONL, so you can review exactly what the agent did after any run.
 - **Vision** — screenshots the agent takes are sent back to a vision-capable model on the next turn, so it can *see* the page and reason about it visually (on by default for API providers; toggle `enableVision` in `/settings`).
 - **Parallel worker engine** — a `worker_threads` pool (resource-limited per worker) runs jobs concurrently; the live UI panel visualizes each worker's state.
-- **Multi-language code execution** — the `code` tool runs **JavaScript, Python, Node, Bash, and PowerShell** in resource-limited worker threads (timeout + force-kill), confined to the workspace. JavaScript runs in an isolated in-process `vm` sandbox (safe, no FS/network; `isolated-vm` is an opt-in hardening hook via `OPENAGENT_SANDBOX=isolated-vm`); the other languages run via the local interpreter when installed and — having full system access like `shell` — are gated by the same approval prompt. JS snippets can also run several-at-once in parallel. (No Docker required; without it, isolation is process- and timeout-level, not a hardened VM.)
+- **Multi-language code execution** — the `code` tool runs **JavaScript, Python, Node, Bash, and PowerShell** in resource-limited worker threads (timeout + force-kill), confined to the workspace. JavaScript runs in an isolated in-process `vm` sandbox (safe, no FS/network; `isolated-vm` is an opt-in hardening hook via `OPENAGENT_SANDBOX=isolated-vm`); the other languages run via the local interpreter when installed and — having full system access like `shell` — are gated by the same approval prompt. JS snippets can also run several-at-once in parallel. The tool also **installs dependencies** (`installDeps`: npm/pip, argument-validated) and **runs test suites** (`runTests`: pytest / jest / mocha / vitest / go, with parsed pass/fail counts — `TESTS: 12 passed, 0 failed`); both are approval-gated like shell. (No Docker required; without it, isolation is process- and timeout-level, not a hardened VM.)
 - **Web research** — the `research` tool searches the web via the [Tavily API](https://tavily.com) and digests the top results (set `TAVILY_API_KEY`, or add it in `/settings`).
 - **Semantic long-term memory** — the `memory` tool stores durable notes as Markdown files and recalls them by *meaning*: hybrid search blends BM25 keywords with embedding similarity ("fix the npm error" now matches "resolve node_modules issue"). Embeddings come from your provider's API when a key exists (OpenAI/Gemini), otherwise from a **local model** (all-MiniLM via transformers.js, ~25 MB downloaded once, no key needed); with neither, recall degrades gracefully to keywords. No vector DB needed — exact cosine over personal-scale notes beats an ANN index.
 - **Memory importance scoring** — notes carry an importance (1–10) that retrieval frequency boosts and staleness decays; recall ranks accordingly, and a `minImportance` filter keeps low-value notes out when context is tight.
@@ -115,6 +119,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
   projects.json      registry of known projects
   schedules.json     local scheduling store (polled in-process)
   audit.log          JSONL audit trail of every tool execution
+  traces/            per-session observability span logs (JSONL)
+  plugins/           user plugins (sandboxed; see Plugin system)
   runs/              background-run records + JSONL event logs
   memory/            long-term memory notes (one Markdown file each)
   sessions/<projectId>/<timestamp>.json
@@ -217,6 +223,19 @@ The shell tool picks the OS shell automatically: `cmd.exe` (via `%ComSpec%`) on 
 
 Sessions are capped at 500 messages. When the cap is reached the full transcript is archived, the oldest 250 messages are summarized into a single system note (no context is lost), and a fresh session file continues. Session files older than 30 days are auto-deleted on startup. Long tool outputs are truncated to 20 lines in the chat with a `... [truncated]` indicator, while the full output is still saved to the session file. The UI also survives terminal resize without crashing.
 
+## Writing a plugin
+
+A plugin is one `.js` file in `./plugins/` (project-local) or `~/.openagent/plugins/` (global): a metadata header comment plus an `execute` function.
+
+```js
+// openagent-plugin: {"name":"slugify","description":"Turn a string into a URL slug","schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}
+function execute(params) {
+  return params.text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+```
+
+Plugins are discovered at startup and offered to the agent as the `plugin` tool. They run **inside the worker-pool JS sandbox** — pure compute only: no filesystem, no network, no `require`, no `process`, hard timeout. `execute` must be synchronous (the sandbox does not await Promises). Names must match `[a-z0-9-]` and not collide with built-in tools.
+
 ## Security
 
 - The agent's working directory is the directory it was launched in. Shell and filesystem operations are confined to it; path traversal (`..`, absolute paths, `~`) is blocked. The trust prompt at launch is the gate for operating in that directory.
@@ -264,6 +283,9 @@ src/
              net-guard (SSRF protection for browser/http)
   audit.ts   JSONL audit log of every tool execution
   health.ts  --health-check component verification
+  trace.ts   per-session observability spans (JSONL)
+  plugins/   sandboxed user-plugin loader (metadata read statically,
+             execution only inside the worker-pool JS sandbox)
   paths.ts   ~/.openagent locations + legacy migration
   startup.ts trust prompt → project detection → first-run wizard
   setup.ts   first-run provider wizard
