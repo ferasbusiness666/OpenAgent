@@ -154,6 +154,81 @@ export class Planner {
       findings: [],
     }));
   }
+
+  /**
+   * IMP-06: rewrite the REMAINING phases after a step got stuck. Given the goal,
+   * the phases already completed, the phase that failed, and the error, ask the
+   * provider for a fresh ordered list of phases that route around the failure.
+   * Returns [] on any failure (no array / parse error / empty) so the caller can
+   * fall back to "stuck" rather than loop. The returned phases are status
+   * "pending"; the caller renumbers and activates them.
+   */
+  async replan(
+    context: { goal: string; completed: string[]; failedPhase: string; error: string },
+    provider?: Provider,
+  ): Promise<Phase[]> {
+    const p = provider ?? this.provider;
+    let raw: string;
+    try {
+      const result = await p.generate({
+        system: "You are the re-planning module of Open Agent.",
+        messages: [{ role: "user", content: buildReplanPrompt(context) }],
+      });
+      raw = result.text;
+    } catch {
+      return [];
+    }
+
+    const jsonText = extractJsonArray(raw);
+    if (jsonText === null) {
+      return [];
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(jsonText);
+    } catch {
+      return [];
+    }
+    const parsed = PlanArraySchema.safeParse(data);
+    if (!parsed.success || parsed.data.length === 0) {
+      return [];
+    }
+    return parsed.data.slice(0, MAX_PHASES).map((entry, index) => ({
+      id: index + 1,
+      title: entry.title,
+      description: entry.description,
+      status: "pending" as const,
+      findings: [],
+    }));
+  }
+}
+
+/** The prompt that asks the model to rewrite the remaining plan around a failure. */
+function buildReplanPrompt(context: {
+  goal: string;
+  completed: string[];
+  failedPhase: string;
+  error: string;
+}): string {
+  const done =
+    context.completed.length > 0
+      ? context.completed.map((t) => `- ${t}`).join("\n")
+      : "(none yet)";
+  return `You are the re-planning module of Open Agent. A phase got stuck and the plan must adapt.
+
+GOAL:
+${context.goal}
+
+ALREADY COMPLETED (do NOT repeat these):
+${done}
+
+THE PHASE THAT FAILED: ${context.failedPhase}
+WHY IT FAILED: ${context.error}
+
+Devise a NEW ordered list of 2 to 6 concrete phases for the REMAINING work that route AROUND this failure (a different approach — not a repeat of what just failed). Do not include the already-completed phases.
+
+Reply with ONLY a JSON array and nothing else — no prose, no markdown fences. Each element is an object with a "title" (a few words) and a "description" (one sentence):
+[{"title": "...", "description": "..."}, {"title": "...", "description": "..."}]`;
 }
 
 /**

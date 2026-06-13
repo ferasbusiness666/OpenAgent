@@ -36,6 +36,49 @@ export const CONTEXT_TOKEN_LIMIT = 100_000;
 /** Fraction of the limit at which token compaction triggers (IMP-03's 70%). */
 export const COMPACT_THRESHOLD = 0.7;
 
+/** Tool-result messages this many positions back are eligible for pruning
+ *  (the most recent N are always kept verbatim). */
+export const PRUNE_KEEP_RECENT_RESULTS = 5;
+
+/** Default relevance score below which a stale tool_result may be pruned. */
+const PRUNE_DEFAULT_THRESHOLD = 0.08;
+/** Default minimum content length (chars) before a tool_result is prunable. */
+const PRUNE_DEFAULT_MIN_CHARS = 600;
+
+/**
+ * Lowercased, deduplicated word set used for Jaccard relevance scoring.
+ * Tokens shorter than 3 chars are dropped as low-signal (articles, "to", etc.).
+ */
+function tokenSet(text: string): Set<string> {
+  const set = new Set<string>();
+  for (const token of text.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (token.length >= 3) {
+      set.add(token);
+    }
+  }
+  return set;
+}
+
+/**
+ * Jaccard overlap (|A ∩ B| / |A ∪ B|) between two texts' token sets. Returns 0
+ * when either side has no qualifying tokens, so empty focus text prunes nothing.
+ */
+function jaccardOverlap(a: string, b: string): number {
+  const setA = tokenSet(a);
+  const setB = tokenSet(b);
+  if (setA.size === 0 || setB.size === 0) {
+    return 0;
+  }
+  let intersection = 0;
+  for (const token of setA) {
+    if (setB.has(token)) {
+      intersection += 1;
+    }
+  }
+  const union = setA.size + setB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
 /** Rough token estimate for messages: ceil(content chars / 4), summed. */
 export function estimateTokens(messages: readonly Message[]): number {
   let total = 0;
@@ -225,6 +268,70 @@ export class SessionMemory {
       `to keep this session within its context-token budget`,
     );
     return true;
+  }
+
+  /**
+   * IMP-20: relevance-prune stale tool_result messages against `focusText` (the
+   * current phase goal / recent turns). For each tool_result OLDER than the last
+   * PRUNE_KEEP_RECENT_RESULTS tool_results: score its relevance to focusText with
+   * lightweight token-overlap (Jaccard over lowercased word sets, ignoring tokens
+   * <3 chars). When score < threshold AND the message is large (> minChars), replace
+   * its content with a one-line stub: "[pruned low-relevance <tool> observation —
+   * N chars omitted]" (preserve the leading "[toolname]" tag if present). NEVER
+   * touch user / assistant / system messages, and never prune the kept-recent tail.
+   * Returns the number of messages pruned. Best-effort; persists once if anything changed.
+   */
+  pruneToolResults(
+    focusText: string,
+    options?: { threshold?: number; minChars?: number },
+  ): number {
+    const threshold = options?.threshold ?? PRUNE_DEFAULT_THRESHOLD;
+    const minChars = options?.minChars ?? PRUNE_DEFAULT_MIN_CHARS;
+
+    // Indices of every tool_result entry, in order.
+    const resultIndices: number[] = [];
+    for (let i = 0; i < this.history.length; i += 1) {
+      if (this.history[i]?.role === "tool_result") {
+        resultIndices.push(i);
+      }
+    }
+
+    // Keep the most recent N tool_results verbatim; only the rest are eligible.
+    const eligible =
+      resultIndices.length > PRUNE_KEEP_RECENT_RESULTS
+        ? resultIndices.slice(0, resultIndices.length - PRUNE_KEEP_RECENT_RESULTS)
+        : [];
+
+    let pruned = 0;
+    for (const index of eligible) {
+      const message = this.history[index];
+      if (message === undefined) {
+        continue;
+      }
+      const content = message.content;
+      // Idempotent: a message already stubbed is skipped.
+      if (content.startsWith("[pruned")) {
+        continue;
+      }
+      if (content.length <= minChars) {
+        continue;
+      }
+      if (jaccardOverlap(focusText, content) >= threshold) {
+        continue;
+      }
+
+      // Preserve a leading "[toolname]" tag if the content carries one.
+      const tagMatch = /^\[([^\]]+)\]/.exec(content);
+      const tool = tagMatch?.[1] ?? "tool";
+      const prefix = tagMatch ? `[${tool}] ` : "";
+      message.content = `${prefix}[pruned low-relevance ${tool} observation — ${content.length} chars omitted]`;
+      pruned += 1;
+    }
+
+    if (pruned > 0) {
+      this.persist();
+    }
+    return pruned;
   }
 
   /**

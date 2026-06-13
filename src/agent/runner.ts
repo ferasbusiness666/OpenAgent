@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 
 import { RunStore } from "./run-store.js";
 import { AgentLoop } from "./loop.js";
-import { getProvider, type Provider } from "../providers/index.js";
+import { getProvider, getFastProvider, type Provider } from "../providers/index.js";
 import { getConfig, isConfigComplete, setActiveWorkspace } from "../config/index.js";
 import { getProjectByPath, createProject, touchProject } from "../memory/projects.js";
 import { newSessionFilePath } from "../memory/session-store.js";
@@ -121,6 +121,9 @@ export async function executeRun(runId: string, deps?: ExecuteRunDeps): Promise<
   const loop = new AgentLoop(provider, session, agentMemory, {
     sessionManager,
     sessionId: rec.sessionId,
+    // IMP-18: route simple steps to the fast model when configured (background
+    // runs benefit most — they're long and unattended).
+    fastProvider: deps?.provider ? undefined : getFastProvider(config),
   });
 
   // -- Mirror every loop event to the run's on-disk log; drive status + notify

@@ -22,6 +22,7 @@ import { UsageTracker, type SessionUsage } from "./usage.js";
 import { WorkingMemory } from "./working-memory.js";
 import { LongTermMemory } from "../memory/longterm.js";
 import { Tracer } from "../trace.js";
+import { computeUnifiedDiff } from "../util/diff.js";
 import { randomUUID } from "node:crypto";
 import {
   turnFromResult,
@@ -70,6 +71,10 @@ const MAX_REFLECTIONS = 2;
 /** Max read-only tool calls the verification pass may make before it must
  *  deliver a verdict (keeps IMP-05 verification cheap and bounded). */
 const MAX_VERIFY_TOOL_STEPS = 4;
+
+/** IMP-06: how many times one run() may dynamically rewrite the plan after a
+ *  phase gets stuck, before it gives up and surfaces "stuck" to the user. */
+const MAX_REPLANS = 2;
 
 /** Filesystem operations the verification pass is allowed to run. */
 const VERIFY_READONLY_OPS = ["read", "list", "grep", "find", "diff"] as const;
@@ -129,6 +134,8 @@ interface RunContext {
   pendingActions: TurnAction[];
   /** The "done" message stashed while the verification pass runs. */
   pendingDoneMessage: string;
+  /** IMP-06: how many times the plan has been dynamically rewritten this run. */
+  replanCount: number;
 }
 
 /** Strongly-typed event payloads emitted by the AgentLoop. */
@@ -152,6 +159,9 @@ export interface AgentEvents {
   /** IMP-15: incremental output from a streaming tool (currently shell) while
    *  it runs. The UI buffers these into ~150ms state updates. */
   toolChunk: (data: { tool: string; chunk: string }) => void;
+  /** IMP-27: emitted after a filesystem write/edit with the unified diff of the
+   *  change, so the UI can render an inline +/- diff view. */
+  fileDiff: (data: { path: string; diff: string }) => void;
 }
 
 /** Optional collaborators and resume state for an AgentLoop. */
@@ -166,6 +176,10 @@ export interface AgentLoopOptions {
   workingMemory?: unknown;
   /** Override the long-term memory store (tests use a temp directory). */
   longTermMemory?: LongTermMemory;
+  /** IMP-18: optional cheaper/faster provider used for simple action steps;
+   *  planning and verification always use the main (smart) provider. Omitted
+   *  (or === the main provider) disables routing. */
+  fastProvider?: Provider;
 }
 
 /** A request to approve a potentially risky action (currently shell commands). */
@@ -199,6 +213,10 @@ export class AgentLoop extends EventEmitter {
   // so the user can switch model/provider via /model or /provider without
   // losing the conversation — the shared SessionMemory carries the history.
   private provider: Provider;
+  // IMP-18: optional fast/cheap provider for simple action steps. Planning and
+  // verification deliberately keep using `provider` (the smart model). undefined
+  // when routing is disabled — every step then uses `provider`.
+  private fastProvider?: Provider;
   private readonly session: SessionMemory;
   private readonly agentMemory: AgentMemory;
   // Cached for the system prompt; refreshed from config via refreshWorkspace()
@@ -253,6 +271,11 @@ export class AgentLoop extends EventEmitter {
     this.workingMemory = WorkingMemory.from(options?.workingMemory);
     this.longTerm = options?.longTermMemory ?? new LongTermMemory();
     this.tracer = new Tracer(this.sessionId);
+    // Only treat it as a fast provider when it's actually a different instance.
+    this.fastProvider =
+      options?.fastProvider && options.fastProvider !== provider
+        ? options.fastProvider
+        : undefined;
   }
 
   /** True while a run() is in progress (used by the Telegram queue). */
@@ -280,6 +303,12 @@ export class AgentLoop extends EventEmitter {
     this.provider = provider;
   }
 
+  /** Swap (or clear) the fast routing provider (IMP-18), e.g. after /settings
+   *  changes fastModel. Cleared when it would equal the main provider. */
+  setFastProvider(provider: Provider | undefined): void {
+    this.fastProvider = provider && provider !== this.provider ? provider : undefined;
+  }
+
   /** Re-read the workspace path from config (after a /settings change). */
   refreshWorkspace(): void {
     this.workspacePath = resolveWorkspacePath(getConfig());
@@ -297,10 +326,11 @@ export class AgentLoop extends EventEmitter {
     return this.usage.get();
   }
 
-  /** Record one provider call's token usage and notify listeners. */
-  private trackUsage(result: GenerateResult): void {
+  /** Record one provider call's token usage and notify listeners. The provider
+   *  name is taken from whichever provider actually made the call (routing). */
+  private trackUsage(result: GenerateResult, provider: Provider = this.provider): void {
     if (result.usage) {
-      this.emit("usage", this.usage.add(this.provider.name, result.usage));
+      this.emit("usage", this.usage.add(provider.name, result.usage));
     }
   }
 
@@ -473,6 +503,7 @@ export class AgentLoop extends EventEmitter {
       maxIterations: ABSOLUTE_MAX_ITERATIONS,
       pendingActions: [],
       pendingDoneMessage: "Task complete.",
+      replanCount: 0,
     };
     this.session.add({ role: "user", content: task, timestamp: new Date() });
 
@@ -599,10 +630,21 @@ export class AgentLoop extends EventEmitter {
       };
     }
 
-    // IMP-03: compact the history when it approaches the context budget.
+    // IMP-03: compact the history when it approaches the context budget, then
+    // IMP-20: prune stale, low-relevance tool observations against the current
+    // goal + active phase so the recent/relevant context stays verbatim.
     this.session.compactIfNeeded();
+    const activePhase = this.phases.find((p) => p.status === "in_progress");
+    const focus = `${this.goal} ${activePhase ? `${activePhase.title} ${activePhase.description}` : ""}`.trim();
+    if (focus.length > 0) {
+      this.session.pruneToolResults(focus);
+    }
 
-    const useVision = this.provider.supportsVision && getConfig().enableVision;
+    // IMP-18: the action loop runs on the FAST provider when routing is enabled;
+    // planning and verification keep using the smart provider. Vision capability
+    // is read from whichever provider will actually make this call.
+    const provider = this.fastProvider ?? this.provider;
+    const useVision = provider.supportsVision && getConfig().enableVision;
     const request = buildGenerateRequest({
       agentMd: this.agentMemory.getContent(),
       workspacePath: this.workspacePath,
@@ -619,11 +661,12 @@ export class AgentLoop extends EventEmitter {
 
     let result: GenerateResult;
     const span = this.tracer.startSpan("provider.generate", {
-      provider: this.provider.name,
+      provider: provider.name,
       iteration: ctx.iterationsUsed,
+      routed: provider !== this.provider,
     });
     try {
-      result = await this.provider.generate(request);
+      result = await provider.generate(request);
     } catch (err) {
       span.end({ error: errMessage(err) });
       return { phase: "error", message: `Provider call failed: ${errMessage(err)}` };
@@ -633,7 +676,7 @@ export class AgentLoop extends EventEmitter {
       tokensOut: result.usage?.outputTokens ?? 0,
       toolCalls: result.toolCalls.length,
     });
-    this.trackUsage(result);
+    this.trackUsage(result, provider);
 
     // ---- Resolve the turn: native tool call(s), else parsed JSON text --------
     const parsed = turnFromResult(result);
@@ -758,6 +801,8 @@ export class AgentLoop extends EventEmitter {
       /** Set when a gate blocked/denied the action (fed back, not a failure). */
       blockedNote?: string;
       result?: ToolResult;
+      /** IMP-27: file content captured BEFORE a filesystem write, for the diff. */
+      preWrite?: string;
     }
     const slots: Slot[] = [];
 
@@ -836,7 +881,14 @@ export class AgentLoop extends EventEmitter {
         }
       }
 
-      slots.push({ action: a });
+      const slot: Slot = { action: a };
+      // IMP-27: capture the file's current content before a write so we can
+      // emit an old→new diff after it succeeds ("" when the file is new).
+      if (a.action === "filesystem" && a.params.operation === "write" && typeof a.params.path === "string") {
+        const read = await executeTool("filesystem", { operation: "read", path: a.params.path });
+        slot.preWrite = read.success ? read.result : "";
+      }
+      slots.push(slot);
     }
 
     // ---- Execute: browser actions serially (one shared page), rest parallel --
@@ -888,6 +940,19 @@ export class AgentLoop extends EventEmitter {
         if (s.action.action === "browser" && s.action.params.operation === "screenshot") {
           this.queueScreenshot(result.result);
         }
+        // IMP-27: emit an inline diff for a filesystem write.
+        if (
+          s.action.action === "filesystem" &&
+          s.action.params.operation === "write" &&
+          s.preWrite !== undefined &&
+          typeof s.action.params.path === "string"
+        ) {
+          const newText = typeof s.action.params.content === "string" ? s.action.params.content : "";
+          const diff = computeUnifiedDiff(s.preWrite, newText, s.action.params.path);
+          if (diff.length > 0) {
+            this.emit("fileDiff", { path: s.action.params.path, diff });
+          }
+        }
         // IMP-08: auto-track produced artifacts in working memory.
         this.trackArtifact(s.action, result.result);
       } else {
@@ -910,6 +975,17 @@ export class AgentLoop extends EventEmitter {
     }
 
     if (giveUp !== null) {
+      // IMP-06: instead of giving up immediately, try to dynamically REPLAN the
+      // remaining work around the failure (bounded by MAX_REPLANS). Only when
+      // replanning is exhausted or itself fails do we surface "stuck".
+      if (ctx.replanCount < MAX_REPLANS) {
+        const replanned = await this.attemptReplan(giveUp.action, giveUp.error);
+        if (replanned) {
+          ctx.replanCount += 1;
+          ctx.corrector.reset();
+          return { phase: "thinking", iteration: ctx.iterationsUsed + 1 };
+        }
+      }
       return {
         phase: "stuck",
         reason:
@@ -1065,6 +1141,58 @@ export class AgentLoop extends EventEmitter {
       `Task: ${truncate(this.goal, 300)}\n` +
       `Successful approach (${toolSequence.length} steps): ${toolSequence.join(" → ")}`;
     await this.longTerm.rememberWithEmbedding(content, ["success_pattern"], 6);
+  }
+
+  /**
+   * IMP-06: rewrite the REMAINING plan around a stuck step. Keeps completed
+   * phases, asks the (smart) provider for fresh phases that route around the
+   * failure, and splices them in as the new pending work. Returns true when the
+   * plan was actually rewritten. Never throws — any failure returns false so
+   * the caller falls back to "stuck".
+   */
+  private async attemptReplan(failedAction: string, error: string): Promise<boolean> {
+    if (this.goal.trim().length === 0) {
+      return false;
+    }
+    const completed = this.phases.filter((p) => p.status === "completed");
+    const failedPhase = this.phases.find((p) => p.status === "in_progress");
+    let fresh: Phase[];
+    try {
+      fresh = await this.planner.replan(
+        {
+          goal: this.goal,
+          completed: completed.map((p) => p.title),
+          failedPhase: failedPhase ? failedPhase.title : `${failedAction} step`,
+          error,
+        },
+        this.provider,
+      );
+    } catch {
+      return false;
+    }
+    if (fresh.length === 0) {
+      return false;
+    }
+    // Keep completed phases; renumber the fresh phases after them and mark the
+    // first one in_progress so the loop picks it up next turn.
+    const kept = completed.map((p, i) => ({ ...p, id: i + 1 }));
+    const offset = kept.length;
+    const replanned: Phase[] = fresh.map((p, i) => ({
+      ...p,
+      id: offset + i + 1,
+      status: i === 0 ? ("in_progress" as const) : ("pending" as const),
+    }));
+    this.phases = [...kept, ...replanned];
+    this.emit("phaseUpdate", this.plan);
+    this.session.add({
+      role: "system",
+      content:
+        `Replanned after a stuck step (${failedAction}: ${truncate(error, 200)}). ` +
+        `The remaining plan was rewritten — continue with the new phases.`,
+      timestamp: new Date(),
+    });
+    this.persistState();
+    return true;
   }
 
   /** Emit the terminal event(s) for the final state and persist. */

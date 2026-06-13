@@ -15,7 +15,7 @@ import {
   validateWorkspacePath,
   type ValidationResult,
 } from "../config/validate.js";
-import { getProvider, detectClis } from "../providers/index.js";
+import { getProvider, getFastProvider, detectClis } from "../providers/index.js";
 import { buildPartial } from "./apply-setting.js";
 import {
   listProjects,
@@ -59,7 +59,8 @@ export type UIMessage =
   | { kind: "agent"; text: string }
   | { kind: "done"; text: string }
   | { kind: "stuck"; text: string }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  | { kind: "diff"; path: string; diff: string };
 
 /** Status shown in the bottom bar. */
 export type AgentStatus =
@@ -449,6 +450,8 @@ export function App({
     const onPlan = (next: Phase[]) => setPhases(next);
     const onPhaseUpdate = (next: Phase[]) => setPhases(next);
     const onUsage = (totals: SessionUsage) => setUsage(totals);
+    const onFileDiff = (data: { path: string; diff: string }) =>
+      push({ kind: "diff", path: data.path, diff: data.diff });
 
     agentLoop.on("usage", onUsage);
     agentLoop.on("toolChunk", onToolChunk);
@@ -461,6 +464,7 @@ export function App({
     agentLoop.on("error", onError);
     agentLoop.on("plan", onPlan);
     agentLoop.on("phaseUpdate", onPhaseUpdate);
+    agentLoop.on("fileDiff", onFileDiff);
 
     return () => {
       agentLoop.off("usage", onUsage);
@@ -474,6 +478,7 @@ export function App({
       agentLoop.off("error", onError);
       agentLoop.off("plan", onPlan);
       agentLoop.off("phaseUpdate", onPhaseUpdate);
+      agentLoop.off("fileDiff", onFileDiff);
     };
   }, [agentLoop, push]);
 
@@ -586,12 +591,16 @@ export function App({
         "apiKey",
         "apiProvider",
         "activeModel",
+        "fastModel",
       ];
       if (providerFields.some((field) => field in built)) {
         try {
           const next = getProvider(saved);
           agentLoop.setProvider(next);
           setActiveProviderName(next.name);
+          // IMP-18: refresh the routing (fast) provider too — it's derived from
+          // the same fields (fastModel, apiKey, apiProvider, providerMode).
+          agentLoop.setFastProvider(getFastProvider(saved));
         } catch (err) {
           push({ kind: "error", text: `Provider not switched: ${errText(err)}` });
         }

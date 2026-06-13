@@ -28,6 +28,7 @@ const FIELDS: Field[] = [
   { key: "apiProvider", label: "API provider", type: "enum", options: ["openai", "anthropic", "google", "groq", "openrouter"] },
   { key: "apiKey", label: "API key", type: "secret" },
   { key: "activeModel", label: "Active model", type: "text" },
+  { key: "fastModel", label: "Fast model (routing)", type: "text" },
   { key: "telegramToken", label: "Telegram token", type: "secret" },
   { key: "telegramChatId", label: "Telegram chat ID", type: "text" },
   { key: "tavilyApiKey", label: "Tavily API key", type: "secret" },
@@ -64,6 +65,8 @@ function helpFor(field: Field, detected: string[]): string {
       return "validated with a live request before saving";
     case "activeModel":
       return "model name/id (e.g. gpt-4o, claude-sonnet-4, gemini-2.0-flash, llama3); blank = provider default";
+    case "fastModel":
+      return "optional cheaper model for simple steps (planning/verification keep the main model); blank disables routing";
     case "telegramToken":
       return "validated via getMe; leave blank to disable Telegram";
     case "tavilyApiKey":

@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type { UIMessage } from "./App.js";
 import { ToolOutput } from "./ToolOutput.js";
+import { DiffView } from "./DiffView.js";
 
 interface ChatViewProps {
   messages: UIMessage[];
@@ -52,6 +53,13 @@ function renderMessage(message: UIMessage, index: number) {
             Agent
           </Text>
           <Text color="white">{message.text}</Text>
+        </Box>
+      );
+
+    case "diff":
+      return (
+        <Box key={index}>
+          <DiffView path={message.path} diff={message.diff} />
         </Box>
       );
 

@@ -27,7 +27,7 @@ import {
   listSessionFiles,
   pruneOldSessions,
 } from "./memory/session-store.js";
-import { getProvider } from "./providers/index.js";
+import { getProvider, getFastProvider } from "./providers/index.js";
 import { AgentLoop } from "./agent/loop.js";
 import { executeRun, launchBackgroundRun } from "./agent/runner.js";
 import { Planner } from "./agent/plan.js";
@@ -254,6 +254,7 @@ async function main(): Promise<void> {
       goal: resumedState?.goal,
       phases: resumedState?.phases,
       workingMemory: resumedState?.metadata.workingMemory,
+      fastProvider: getFastProvider(config),
     });
     if (resumedState) {
       console.log(
@@ -324,6 +325,7 @@ async function main(): Promise<void> {
     goal: resumedState?.goal,
     phases: resumedState?.phases,
     workingMemory: resumedState?.metadata.workingMemory,
+    fastProvider: getFastProvider(config),
   });
   if (resumedState) {
     console.log(

@@ -57,3 +57,22 @@ export function getProvider(config?: Config): Provider {
 
   return new APIProvider(cfg.apiKey, cfg.apiProvider, cfg.activeModel);
 }
+
+/**
+ * IMP-18: build the optional FAST provider for model routing — a cheaper/faster
+ * model used for simple action steps while the configured (smart) model handles
+ * planning, verification, and reasoning. Returns undefined when routing is off:
+ * `fastModel` is empty, equals `activeModel`, or the provider is CLI mode (one
+ * CLI, nothing to route to). Same provider/key as the main one, different model.
+ */
+export function getFastProvider(config?: Config): Provider | undefined {
+  const cfg = config ?? getConfig();
+  if (cfg.providerMode !== "api") {
+    return undefined;
+  }
+  const fast = cfg.fastModel.trim();
+  if (fast.length === 0 || fast === cfg.activeModel.trim()) {
+    return undefined;
+  }
+  return new APIProvider(cfg.apiKey, cfg.apiProvider, fast);
+}
