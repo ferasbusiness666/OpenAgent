@@ -76,6 +76,13 @@ const MAX_VERIFY_TOOL_STEPS = 4;
  *  phase gets stuck, before it gives up and surfaces "stuck" to the user. */
 const MAX_REPLANS = 2;
 
+/** IMP-31: maximum agent nesting depth. A loop at depth ≥ this cannot `spawn`
+ *  children, so recursion (and fan-out cost) is hard-bounded. 1 = only the
+ *  top-level agent spawns; its children run to completion but cannot spawn. */
+const MAX_SPAWN_DEPTH = 1;
+/** Hard ceiling on iterations a spawned child may use, regardless of its plan. */
+const CHILD_MAX_ITERATIONS = 30;
+
 /** Filesystem operations the verification pass is allowed to run. */
 const VERIFY_READONLY_OPS = ["read", "list", "grep", "find", "diff"] as const;
 
@@ -91,6 +98,7 @@ const TOOL_ACTIONS = [
   "serve",
   "http",
   "plugin",
+  "spawn",
 ] as const;
 type ToolAction = (typeof TOOL_ACTIONS)[number];
 
@@ -180,6 +188,12 @@ export interface AgentLoopOptions {
    *  planning and verification always use the main (smart) provider. Omitted
    *  (or === the main provider) disables routing. */
   fastProvider?: Provider;
+  /** IMP-31: nesting depth of this loop. 0 = top-level; a child created by the
+   *  `spawn` action gets parent depth + 1. Depth ≥ MAX_SPAWN_DEPTH cannot spawn
+   *  further (prevents runaway recursion / fan-out). */
+  spawnDepth?: number;
+  /** IMP-31: when set, restrict this (child) loop to these tool actions. */
+  allowedActions?: readonly string[];
 }
 
 /** A request to approve a potentially risky action (currently shell commands). */
@@ -249,6 +263,9 @@ export class AgentLoop extends EventEmitter {
   private readonly longTerm: LongTermMemory;
   // IMP-24: per-session span log (~/.openagent/traces/<sessionId>.jsonl).
   private readonly tracer: Tracer;
+  // IMP-31: this loop's nesting depth and (for a child) its scoped tool set.
+  private readonly spawnDepth: number;
+  private readonly allowedActions?: readonly string[];
 
   constructor(
     provider: Provider,
@@ -276,6 +293,8 @@ export class AgentLoop extends EventEmitter {
       options?.fastProvider && options.fastProvider !== provider
         ? options.fastProvider
         : undefined;
+    this.spawnDepth = options?.spawnDepth ?? 0;
+    this.allowedActions = options?.allowedActions;
   }
 
   /** True while a run() is in progress (used by the Telegram queue). */
@@ -654,6 +673,8 @@ export class AgentLoop extends EventEmitter {
       images: useVision && this.pendingImages.length > 0 ? this.pendingImages : undefined,
       // IMP-08: recite the accumulated task state in the volatile final turn.
       workingMemory: this.workingMemory.isEmpty() ? undefined : this.workingMemory.render(),
+      // IMP-31: a spawned child only sees its scoped tool set.
+      allowedActions: this.allowedActions,
     });
     // Screenshots are shown once: clear them whether or not vision is on, so
     // they never accumulate across turns.
@@ -898,9 +919,13 @@ export class AgentLoop extends EventEmitter {
     // IMP-15 + IMP-24: stream incremental output to the UI and trace each run.
     const runOne = async (s: (typeof slots)[number]): Promise<void> => {
       const toolSpan = this.tracer.startSpan(`tool.${s.action.action}`);
-      s.result = await executeTool(s.action.action, s.action.params, {
-        onChunk: (chunk) => this.emit("toolChunk", { tool: s.action.action, chunk }),
-      });
+      // IMP-31: `spawn` runs a child agent rather than a registry tool.
+      s.result =
+        s.action.action === "spawn"
+          ? await this.runChildAgent(s.action.params)
+          : await executeTool(s.action.action, s.action.params, {
+              onChunk: (chunk) => this.emit("toolChunk", { tool: s.action.action, chunk }),
+            });
       toolSpan.end({ success: s.result.success });
     };
     const work: Promise<void>[] = parallelSlots.map(runOne);
@@ -1141,6 +1166,77 @@ export class AgentLoop extends EventEmitter {
       `Task: ${truncate(this.goal, 300)}\n` +
       `Successful approach (${toolSequence.length} steps): ${toolSequence.join(" → ")}`;
     await this.longTerm.rememberWithEmbedding(content, ["success_pattern"], 6);
+  }
+
+  /**
+   * IMP-31: run a focused sub-task in a CHILD agent and return its result as a
+   * tool observation. The child shares this workspace, long-term memory, and
+   * provider(s) but gets a FRESH session memory (isolated context) and no
+   * persistence. Depth-bounded (a child cannot spawn past MAX_SPAWN_DEPTH) and
+   * iteration-capped. The child inherits this loop's approval handler so risky
+   * actions it takes are still gated. Never throws.
+   */
+  private async runChildAgent(params: Record<string, unknown>): Promise<ToolResult> {
+    if (this.spawnDepth >= MAX_SPAWN_DEPTH) {
+      return {
+        success: false,
+        result: "",
+        error: `Cannot spawn: maximum sub-agent nesting depth (${MAX_SPAWN_DEPTH}) reached. Do this work yourself.`,
+      };
+    }
+    const task = typeof params.task === "string" ? params.task.trim() : "";
+    if (task.length === 0) {
+      return { success: false, result: "", error: 'spawn requires a non-empty "task" string.' };
+    }
+    const allowed = Array.isArray(params.tools)
+      ? params.tools.filter((t): t is string => typeof t === "string")
+      : undefined;
+
+    const span = this.tracer.startSpan("spawn.child", { depth: this.spawnDepth + 1 });
+    const child = new AgentLoop(this.provider, new SessionMemory(), this.agentMemory, {
+      spawnDepth: this.spawnDepth + 1,
+      ...(allowed && allowed.length > 0 ? { allowedActions: allowed } : {}),
+      ...(this.fastProvider ? { fastProvider: this.fastProvider } : {}),
+      longTermMemory: this.longTerm,
+    });
+    // Cap the child's effort regardless of how it plans.
+    const prevCap = process.env.OPENAGENT_MAX_ITERATIONS;
+    process.env.OPENAGENT_MAX_ITERATIONS = String(CHILD_MAX_ITERATIONS);
+    // The child inherits the approval gate so its risky actions still prompt.
+    if (this.approvalHandler) {
+      child.setApprovalHandler(this.approvalHandler);
+    }
+    // Surface the child's activity to the parent UI as streaming chunks.
+    child.on("toolCall", (d) => this.emit("toolChunk", { tool: "spawn", chunk: `↳ ${d.tool}` }));
+
+    let finalMessage = "";
+    let outcome: "done" | "stuck" | "error" = "done";
+    child.on("done", (m) => { finalMessage = m; outcome = "done"; });
+    child.on("stuck", (m) => { finalMessage = m; outcome = "stuck"; });
+    child.on("error", (m) => { finalMessage = m; outcome = "error"; });
+
+    try {
+      await child.run(task);
+    } catch (err) {
+      span.end({ outcome: "error" });
+      return { success: false, result: "", error: `Sub-agent crashed: ${errMessage(err)}` };
+    } finally {
+      if (prevCap === undefined) {
+        delete process.env.OPENAGENT_MAX_ITERATIONS;
+      } else {
+        process.env.OPENAGENT_MAX_ITERATIONS = prevCap;
+      }
+    }
+    span.end({ outcome });
+
+    if (outcome === "done") {
+      return { success: true, result: `Sub-agent completed the task.\nResult: ${finalMessage}` };
+    }
+    return {
+      success: false,
+      result: "",
+      error: `Sub-agent did not finish (${outcome}): ${finalMessage}`,
+    };
   }
 
   /**

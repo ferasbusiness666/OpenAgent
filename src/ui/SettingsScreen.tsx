@@ -39,6 +39,7 @@ const FIELDS: Field[] = [
   { key: "permReadFiles", label: "Allow reading files", type: "enum", options: ["true", "false"] },
   { key: "allowLocalNetworkAccess", label: "Allow local-network URLs", type: "enum", options: ["true", "false"] },
   { key: "budgetUsd", label: "Session budget (USD)", type: "text" },
+  { key: "encryptSecrets", label: "Encrypt secrets at rest", type: "enum", options: ["true", "false"] },
   { key: "onboardingCompleted", label: "Onboarding completed", type: "enum", options: ["true", "false"] },
 ];
 
@@ -85,6 +86,8 @@ function helpFor(field: Field, detected: string[]): string {
       return "when true, the browser/http tools may reach localhost and private LAN addresses (SSRF guard off)";
     case "budgetUsd":
       return "stop the agent when the estimated session cost reaches this many USD; 0 = no limit";
+    case "encryptSecrets":
+      return "when true, API keys/tokens are encrypted at rest (OS keychain if available, else AES file) instead of plaintext in config.json";
     case "onboardingCompleted":
       return "set to false (or run /onboarding) to replay the first-run walkthrough";
     default:

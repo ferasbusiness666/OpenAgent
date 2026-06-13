@@ -187,6 +187,22 @@ export const AGENT_TOOLS: readonly ToolSchema[] = [
     ),
   },
   {
+    name: "spawn",
+    description:
+      "Delegate a focused sub-task to a child agent that runs to completion in this same workspace and returns its result. Use for a self-contained chunk of work (research a topic, build one module) so your own context stays focused. The child has its own fresh memory; you get its final answer back as the observation.",
+    parameters: obj(
+      {
+        task: str("the self-contained sub-task for the child agent"),
+        tools: {
+          type: "array",
+          items: { type: "string" },
+          description: "optional subset of tool names the child may use (default: all)",
+        },
+      },
+      ["task"],
+    ),
+  },
+  {
     name: "note",
     description:
       "Record durable task state in working memory (shown back to you every turn): facts discovered, constraints that must hold, or named variables resolved (ids, paths, URLs). Use it for things you must not forget mid-task.",

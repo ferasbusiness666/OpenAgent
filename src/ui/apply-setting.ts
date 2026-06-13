@@ -115,6 +115,12 @@ export function buildPartial(
         partial.budgetUsd = n;
         break;
       }
+      case "encryptSecrets": {
+        const b = asBool("encryptSecrets", value);
+        if (typeof b !== "boolean") return b;
+        partial.encryptSecrets = b;
+        break;
+      }
       default:
         // Ignore unknown keys.
         break;

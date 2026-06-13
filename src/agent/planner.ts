@@ -24,6 +24,7 @@ export const ACTION_NAMES = [
   "serve",
   "http",
   "plugin",
+  "spawn",
   "note",
   "update_plan",
   "done",
@@ -132,16 +133,19 @@ ${renderPluginList(loadPlugins().plugins)
   .map((line) => `   ${line}`)
   .join("\n")}
 
-11. note — record durable task state in working memory (shown back to you every turn): facts discovered, constraints, named variables. Use it for things you must not forget mid-task.
+11. spawn — delegate a focused, self-contained sub-task to a child agent that runs to completion in this workspace and returns its result. Keeps your own context lean for big multi-part goals.
+   params: { "task": "the self-contained sub-task", "tools": ["optional","subset","of","tool","names"] }
+
+12. note — record durable task state in working memory (shown back to you every turn): facts discovered, constraints, named variables. Use it for things you must not forget mid-task.
    params: { "facts": ["..."], "constraints": ["..."], "variables": { "name": "value" } } (all optional)
 
-12. update_plan — report progress on a phase (alternative to the "progress" field).
+13. update_plan — report progress on a phase (alternative to the "progress" field).
    params: { "phase": number, "status": "in_progress" | "completed" | "failed", "finding": "short note (optional)" }
 
-13. done — the task is fully complete. Put the final answer to the user in "message".
+14. done — the task is fully complete. Put the final answer to the user in "message".
    params: { }
 
-14. stuck — you cannot proceed without the user. Explain what you need in "message".
+15. stuck — you cannot proceed without the user. Explain what you need in "message".
    params: { }`;
 
 export interface SystemPromptOptions {
@@ -178,7 +182,7 @@ If you have been given tools (function calling), CALL a tool — the tool name i
 You must ALWAYS respond with a SINGLE valid JSON object matching this exact shape and nothing else:
 {
   "thought": "your internal reasoning for this step",
-  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | plugin | note | done | stuck",
+  "action": "shell | filesystem | browser | github | research | code | memory | serve | http | plugin | spawn | note | done | stuck",
   "params": { ... },
   "message": "what to show the user (optional)",
   "progress": { "phase": 1, "status": "in_progress | completed | failed", "finding": "optional short note" }
@@ -231,6 +235,10 @@ export interface PromptOptions {
    *  variables), recited in the final user turn — never the cacheable system
    *  prefix. Omitted when empty. */
   workingMemory?: string;
+  /** IMP-31: when set, only these tool actions are offered to the model (a
+   *  spawned child agent's scoped tool set). The control actions
+   *  done/stuck/update_plan/note are always kept. Omitted = all tools. */
+  allowedActions?: readonly string[];
 }
 
 /**
@@ -274,7 +282,20 @@ export function buildGenerateRequest(opts: PromptOptions): GenerateRequest {
   // Offer the action set as NATIVE tools. API providers use function-calling and
   // return a structured action; providers without tools (CLI) fall back to the
   // JSON action protocol described in the system prompt.
-  return { system, messages, tools: [...AGENT_TOOLS] };
+  // IMP-31: a spawned child agent may restrict the offered tools; the control
+  // actions are always kept so the child can finish / report / track its plan.
+  const tools =
+    opts.allowedActions === undefined
+      ? [...AGENT_TOOLS]
+      : AGENT_TOOLS.filter(
+          (t) =>
+            opts.allowedActions?.includes(t.name) ||
+            t.name === "done" ||
+            t.name === "stuck" ||
+            t.name === "update_plan" ||
+            t.name === "note",
+        );
+  return { system, messages, tools };
 }
 
 // ---- Reflection / self-critique --------------------------------------------

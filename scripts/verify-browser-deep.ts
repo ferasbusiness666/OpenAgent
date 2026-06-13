@@ -21,11 +21,15 @@ import os from "node:os";
 import fs from "fs-extra";
 import { BrowserTool } from "../src/tools/browser.js";
 import { ServeTool, closeAllServers } from "../src/tools/serve.js";
-import { closeBrowser, executeTool } from "../src/tools/index.js";
 import { setActiveWorkspace, getConfig, saveConfig } from "../src/config/index.js";
 
 const checks: Array<[string, boolean]> = [];
-const ok = (l: string, c: boolean): void => { checks.push([l, c]); };
+// Print each check as it lands (not only at the end) so a slow Chromium launch
+// can't make a still-running suite look like a silent hang.
+const ok = (l: string, c: boolean): void => {
+  checks.push([l, c]);
+  process.stderr.write(`${c ? "✓" : "✗"} ${l}\n`);
+};
 
 async function main(): Promise<void> {
   const ws = path.join(os.tmpdir(), "openagent-browser-deep-" + Date.now());
@@ -208,26 +212,27 @@ async function main(): Promise<void> {
     }
 
   } finally {
-    await closeAllServers();
-    await browser.close();
-    // Also close the registry's shared browser instance.
-    await closeBrowser();
-    saveConfig(origConfig);
+    // Teardown must never hang the suite: a wedged Chromium close on a loaded
+    // machine shouldn't block the verdict (all checks are already recorded).
+    // Bound each teardown step with a short timeout, then force-exit below.
+    const withTimeout = async (p: Promise<unknown>, ms: number): Promise<void> => {
+      await Promise.race([
+        p.catch(() => undefined),
+        new Promise<void>((r) => setTimeout(r, ms)),
+      ]);
+    };
+    await withTimeout(closeAllServers(), 5000);
+    await withTimeout(browser.close(), 5000);
+    try { saveConfig(origConfig); } catch { /* best-effort */ }
     setActiveWorkspace(process.cwd());
-    fs.removeSync(ws);
+    try { fs.removeSync(ws); } catch { /* best-effort */ }
   }
 
   for (const [l, c] of checks) console.log(`${c ? "✓" : "✗"} ${l}`);
   const allOk = checks.every(([, c]) => c);
   console.log(`\nBROWSER-DEEP VERIFY: ${allOk ? "PASS" : "FAIL"}`);
-
-  // Registry dispatch status for the caller.
-  console.log(
-    "\nRegistry dispatch note: injectJs / setCookies / getCookies / download / network " +
-    "are NOT wired in the registry (parseBrowserParams / dispatchBrowser). " +
-    "Tests use BrowserTool methods directly.",
-  );
-
+  // Force exit: a lingering Chromium handle can otherwise keep the event loop
+  // alive even after a clean, fully-passed run.
   process.exit(allOk ? 0 : 1);
 }
 

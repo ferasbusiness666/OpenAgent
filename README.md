@@ -33,6 +33,10 @@ The primary interface is a terminal UI styled like Claude Code / OpenCode. Teleg
 - **Learns from successes** — when a task completes, the goal + the tool sequence that worked is stored as a `success_pattern` memory; similar future tasks get the top patterns injected as few-shot guidance, so the agent improves over time without fine-tuning.
 - **Self-healing recovery** — failed steps are retried with exponential back-off and jitter before the agent gives up and reports `stuck`.
 - **Verification before done** — before accepting `done`, a checking pass reviews the work against the original goal and can *actually inspect the results* with read-only filesystem operations (re-read generated files, grep for expected content, diff outputs — bounded to a few calls) before delivering its verdict; an incomplete verdict feeds the gap back and the agent keeps working. Toggle `enableReflection` in `/settings`.
+- **Dynamic replanning** — when a phase fails three times the agent doesn't just give up: it asks the planner to rewrite the *remaining* plan around the failure (keeping completed phases) and keeps going, bounded so it can't loop forever.
+- **Model routing** — set an optional `fastModel` and the agent runs simple action steps on the cheaper/faster model while planning and the final verification stay on your main model; off by default (empty `fastModel`), and the live cost readout reflects whichever model ran each call.
+- **Multi-agent spawn** — for big multi-part goals the agent can `spawn` a child agent on a focused sub-task; the child runs to completion in the same workspace with its own isolated context (optionally a scoped tool set) and returns its result. Depth-bounded so it can't recurse, and the child inherits the same approval gate.
+- **Encrypted secrets (opt-in)** — turn on `encryptSecrets` and API keys/tokens move out of plaintext `config.json` into the OS keychain (when `keytar` is installed) or an AES-256-GCM file with a machine-derived key; off by default, and the startup line is candid about the file backend's threat model.
 - **Native function-calling** — with an API provider the agent acts via real tool/function calls (Anthropic tools, OpenAI/Groq functions, Gemini functionDeclarations), so its actions are structured rather than parsed out of text — far fewer malformed-action retries. CLI providers fall back to the JSON action protocol.
 - **Local preview** — the `serve` tool hosts a workspace directory over HTTP on `localhost` and returns the URL, for previewing what the agent built.
 - **Eval harness** — `npx tsx scripts/eval.ts` runs 12 canonical tasks end-to-end and reports pass/fail plus per-task steps, tokens, cost, and wall time (`--json` writes `eval-results.json` for tracking across commits; `--selftest` drives the full loop+tools path offline with a scripted provider).
@@ -144,6 +148,8 @@ All persistent data lives under `~/.openagent/` in your home directory — never
 | `tavilyApiKey` | API key for the `research` tool's [Tavily](https://tavily.com) backend. Also read from the `TAVILY_API_KEY` env var, which takes precedence. |
 | `allowLocalNetworkAccess` | When true, the browser/http tools may reach localhost and private LAN addresses (the SSRF guard is off). Default false; the agent's own `serve` previews are always allowed. |
 | `budgetUsd` | Stop the agent when the estimated session cost reaches this many USD (`0`, the default, disables the limit). The `--budget <usd>` CLI flag overrides it for one run without persisting. |
+| `fastModel` | Optional cheaper/faster model for simple action steps (model routing). Empty (default) = routing off, every step uses `activeModel`. Planning and verification always use `activeModel`. |
+| `encryptSecrets` | When true, `apiKey`/`telegramToken`/`tavilyApiKey` are encrypted at rest (OS keychain via `keytar` if installed, else an AES-256-GCM file with a machine-derived key) and blanked in `config.json`. Default false (plaintext, unchanged). |
 
 You can edit all of these live from inside the app with `/settings`. Values are **validated before they are saved** — an invalid value is rejected and not written:
 
@@ -261,7 +267,8 @@ src/
              http (SSRF-guarded client), registry
   agent/     ... + tool-schemas (native function-calling definitions),
              usage (token/cost tracking + budget),
-             working-memory (structured task state, recited every turn)
+             working-memory (structured task state, recited every turn),
+             turn (pure turn parsing/serialization, split from loop)
   eval/      eval-harness tasks (scripts/eval.ts runs them)
   workers/   worker_threads pool, worker-entry (isolated-vm/vm sandbox), types
   scheduler/ file-based scheduler + types
@@ -284,6 +291,7 @@ src/
   audit.ts   JSONL audit log of every tool execution
   health.ts  --health-check component verification
   trace.ts   per-session observability spans (JSONL)
+  secrets.ts opt-in encryption-at-rest (keychain / AES file)
   plugins/   sandboxed user-plugin loader (metadata read statically,
              execution only inside the worker-pool JS sandbox)
   paths.ts   ~/.openagent locations + legacy migration

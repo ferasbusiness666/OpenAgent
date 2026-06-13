@@ -2,6 +2,7 @@ import fs from "fs-extra";
 import path from "node:path";
 import { z } from "zod";
 import { CONFIG_PATH, ensureDataDir } from "../paths.js";
+import { getSecret, setSecret } from "../secrets.js";
 
 export { CONFIG_PATH } from "../paths.js";
 
@@ -54,7 +55,21 @@ export const ConfigSchema = z.object({
   // Spending limit (estimated USD) per session; the loop stops with "stuck"
   // before exceeding it. 0 disables budget enforcement.
   budgetUsd: z.number().min(0).default(0),
+  // IMP-35: opt-in encryption-at-rest for the secret fields (apiKey,
+  // telegramToken, tavilyApiKey). Default FALSE — when off, config.json behaves
+  // exactly as it always has (plaintext). When true, secrets are stored via the
+  // secrets module (OS keychain if available, else an AES-256-GCM file) and the
+  // copy written to config.json is blanked. See src/secrets.ts for the honest
+  // threat model. getConfig() transparently refills the blanked fields.
+  encryptSecrets: z.boolean().default(false),
 });
+
+/**
+ * The config fields that carry credentials and are subject to encryption-at-rest
+ * when `encryptSecrets` is enabled.
+ */
+const SECRET_FIELDS = ["apiKey", "telegramToken", "tavilyApiKey"] as const;
+type SecretField = (typeof SECRET_FIELDS)[number];
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -142,11 +157,43 @@ function applyEnvOverrides(config: Config): Config {
 }
 
 /**
- * Read the effective config: config.json with environment overrides applied.
- * Read on every load so external edits / env changes are always picked up.
+ * When `encryptSecrets` is on, refill any secret field that is still empty after
+ * the env overlay from the secret store. Env always wins (a non-empty value is
+ * never overwritten); config.json blanked the fields at save time, so for a
+ * stored secret the value comes from getSecret(). A no-op when the flag is off,
+ * which keeps default behavior 100% unchanged. Never throws.
+ */
+function applySecretOverrides(config: Config): Config {
+  if (config.encryptSecrets !== true) {
+    return config;
+  }
+  const result = { ...config };
+  for (const field of SECRET_FIELDS) {
+    const current = result[field];
+    if (typeof current === "string" && current.length > 0) {
+      // Env (or a still-present plaintext value) takes precedence.
+      continue;
+    }
+    try {
+      const stored = getSecret(field);
+      if (stored !== null && stored.length > 0) {
+        result[field] = stored;
+      }
+    } catch {
+      // Never let a secret-store hiccup break config loading.
+    }
+  }
+  return result;
+}
+
+/**
+ * Read the effective config: config.json with environment overrides applied
+ * (and, when encryptSecrets is on, blanked secret fields refilled from the
+ * secret store). Read on every load so external edits / env changes are always
+ * picked up.
  */
 export function getConfig(): Config {
-  return applyEnvOverrides(readFileConfig());
+  return applySecretOverrides(applyEnvOverrides(readFileConfig()));
 }
 
 /**
@@ -159,7 +206,31 @@ export function saveConfig(partial: Partial<Config>): Config {
   const current = readFileConfig();
   const merged: Config = { ...current, ...partial };
   const validated = ConfigSchema.parse(merged);
-  fs.writeJsonSync(CONFIG_PATH, validated, { spaces: 2 });
+
+  // IMP-35: when encryption-at-rest is on, persist each non-empty secret to the
+  // secret store and BLANK it in the copy written to config.json — but keep the
+  // real values in the object we RETURN (callers rely on the effective config).
+  let toWrite: Config = validated;
+  if (validated.encryptSecrets === true) {
+    const blanked: Config = { ...validated };
+    for (const field of SECRET_FIELDS) {
+      const value = validated[field];
+      if (typeof value === "string" && value.length > 0) {
+        try {
+          setSecret(field, value);
+        } catch {
+          // If storing fails we still must not write plaintext, but we also
+          // must not lose the value: keep it in the returned object (below) and
+          // leave the on-disk field blank. Worst case the user re-enters it.
+        }
+        blanked[field] = "" as Config[SecretField];
+      }
+    }
+    toWrite = blanked;
+  }
+
+  fs.writeJsonSync(CONFIG_PATH, toWrite, { spaces: 2 });
+  // Return the EFFECTIVE config (real secrets intact), env overlay applied.
   return applyEnvOverrides(validated);
 }
 

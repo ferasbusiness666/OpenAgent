@@ -12,6 +12,7 @@ import {
 } from "./config/index.js";
 import { migrateLegacyData } from "./paths.js";
 import { pruneOldTraces } from "./trace.js";
+import { hydrateSecrets, secretsBackend, describeSecretsBackend } from "./secrets.js";
 import { runSetup } from "./setup.js";
 import { runStartupFlow } from "./startup.js";
 import { AgentMemory } from "./memory/agent-md.js";
@@ -141,6 +142,19 @@ async function main(): Promise<void> {
   migrateLegacyData();
   // IMP-24: drop observability traces older than two weeks (best-effort).
   pruneOldTraces();
+  // IMP-35: when encryption-at-rest is enabled, hydrate the secret cache (a
+  // no-op for the file backend) and warn if we fell back to the AES file
+  // backend (no OS keychain). Best-effort — never blocks startup.
+  if (getConfig().encryptSecrets) {
+    try {
+      await hydrateSecrets(["apiKey", "telegramToken", "tavilyApiKey"]);
+      if (secretsBackend() !== "keychain") {
+        console.error(chalk.yellow(`⚠ ${describeSecretsBackend()}`));
+      }
+    } catch {
+      // Secret hydration must never prevent the app from starting.
+    }
+  }
 
   // ---- Health check (IMP-25): verify components, print the report, exit. ----
   if (options.healthCheck === true) {
