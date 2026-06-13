@@ -83,6 +83,14 @@ export class BrowserTool {
   /** Maximum entries retained in the network ring buffer. */
   private static readonly NETWORK_BUFFER_CAP = 200;
 
+  /**
+   * Per-URL character cap for ring-buffer entries. The entry COUNT is already
+   * bounded (NETWORK_BUFFER_CAP), but a single `data:`/`blob:` URL can be
+   * megabytes, so without this the buffer's memory is effectively unbounded.
+   * 200 entries × 2 KB keeps the whole buffer well under 1 MB.
+   */
+  private static readonly NETWORK_URL_CAP = 2_000;
+
   /** Character cap applied to serialized output of getCookies / injectJs. */
   private static readonly OUTPUT_CAP = 4_000;
 
@@ -116,9 +124,14 @@ export class BrowserTool {
       page.on("response", (response) => {
         try {
           const request = response.request();
+          const rawUrl = response.url();
+          const url =
+            rawUrl.length > BrowserTool.NETWORK_URL_CAP
+              ? rawUrl.slice(0, BrowserTool.NETWORK_URL_CAP) + "…"
+              : rawUrl;
           this.recordNetwork({
             method: request.method(),
-            url: response.url(),
+            url,
             status: response.status(),
             resourceType: request.resourceType(),
             at: Date.now(),

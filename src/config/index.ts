@@ -20,6 +20,9 @@ export const ConfigSchema = z.object({
   apiKey: z.string().default(""),
   apiProvider: z.enum(["openai", "anthropic", "google", "groq", "openrouter"]).default("anthropic"),
   activeModel: z.string().default(""),
+  // IMP-18: optional cheaper/faster model for simple steps (model routing).
+  // Empty disables routing — every step uses activeModel.
+  fastModel: z.string().default(""),
   telegramToken: z.string().default(""),
   telegramChatId: z.string().default(""),
   // API key for the Tavily web-research backend (https://tavily.com). Also

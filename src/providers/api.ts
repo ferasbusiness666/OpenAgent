@@ -11,103 +11,18 @@ import type {
 
 export type { ApiProviderName } from "./catalog.js";
 
-/**
- * Wire shapes for the per-provider message `content` / `parts` fields. When a
- * message carries images we send a block array in the provider's native vision
- * format; otherwise we send the plain string (Anthropic/OpenAI) or a single
- * text part (Gemini) exactly as before.
- */
-interface AnthropicTextBlock {
-  type: "text";
-  text: string;
-}
-interface AnthropicImageBlock {
-  type: "image";
-  source: { type: "base64"; media_type: string; data: string };
-}
-type AnthropicContent = string | Array<AnthropicTextBlock | AnthropicImageBlock>;
-
-interface OpenAITextPart {
-  type: "text";
-  text: string;
-}
-interface OpenAIImagePart {
-  type: "image_url";
-  image_url: { url: string };
-}
-type OpenAIContent = string | Array<OpenAITextPart | OpenAIImagePart>;
-
-interface GeminiTextPart {
-  text: string;
-}
-interface GeminiInlineDataPart {
-  inlineData: { mimeType: string; data: string };
-}
-type GeminiPart = GeminiTextPart | GeminiInlineDataPart;
-
-/**
- * Minimal shapes of the response payloads we read from each provider. When the
- * request offered native tools, the response may carry tool-call blocks/parts
- * alongside (or instead of) text; these shapes describe just the fields we read.
- */
-interface AnthropicResponseBlock {
-  type?: string;
-  /** Present on `text` blocks. */
-  text?: string;
-  /** Present on `tool_use` blocks — the tool's declared name. */
-  name?: string;
-  /** Present on `tool_use` blocks — the parsed argument object. */
-  input?: Record<string, unknown>;
-}
-/** Anthropic usage block. Cache writes (`cache_creation_input_tokens`) are
- *  billed as input, so we fold them into `inputTokens`. */
-interface AnthropicUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_read_input_tokens?: number;
-  cache_creation_input_tokens?: number;
-}
-interface AnthropicResponse {
-  content?: AnthropicResponseBlock[];
-  usage?: AnthropicUsage;
-}
-
-interface OpenAIToolCall {
-  function?: { name?: string; arguments?: string };
-}
-interface OpenAIResponseMessage {
-  content?: string;
-  tool_calls?: OpenAIToolCall[];
-}
-interface OpenAIUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
-}
-interface OpenAIResponse {
-  choices?: Array<{ message?: OpenAIResponseMessage }>;
-  usage?: OpenAIUsage;
-}
-
-interface GoogleFunctionCall {
-  name?: string;
-  args?: Record<string, unknown>;
-}
-interface GooglePart {
-  text?: string;
-  functionCall?: GoogleFunctionCall;
-}
-interface GoogleUsageMetadata {
-  promptTokenCount?: number;
-  candidatesTokenCount?: number;
-  cachedContentTokenCount?: number;
-}
-interface GoogleResponse {
-  candidates?: Array<{
-    content?: { parts?: GooglePart[] };
-  }>;
-  usageMetadata?: GoogleUsageMetadata;
-}
+// On-the-wire request/response shapes live in ./wire-types.ts (IMP-34).
+import type {
+  AnthropicContent,
+  AnthropicImageBlock,
+  AnthropicResponse,
+  OpenAIContent,
+  OpenAIImagePart,
+  OpenAIResponse,
+  GeminiPart,
+  GeminiInlineDataPart,
+  GoogleResponse,
+} from "./wire-types.js";
 
 /**
  * Calls a hosted chat/completions API with a cacheable system prefix plus the

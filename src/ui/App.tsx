@@ -16,7 +16,7 @@ import {
   type ValidationResult,
 } from "../config/validate.js";
 import { getProvider, detectClis } from "../providers/index.js";
-import { isApiProviderName, API_PROVIDER_IDS } from "../providers/catalog.js";
+import { buildPartial } from "./apply-setting.js";
 import {
   listProjects,
   createProject,
@@ -106,90 +106,6 @@ interface AppProps {
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Build a type-safe Partial<Config> from raw string edits, validating the two
- * enum fields. Unknown keys are ignored. Returns an error string for invalid
- * enum values. (saveConfig re-validates the whole merged config too.)
- */
-function buildPartial(raw: Record<string, string>): Partial<Config> | { error: string } {
-  const partial: Partial<Config> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    switch (key) {
-      case "workspacePath":
-        partial.workspacePath = value;
-        break;
-      case "activeCliName":
-        partial.activeCliName = value;
-        break;
-      case "apiKey":
-        partial.apiKey = value;
-        break;
-      case "activeModel":
-        partial.activeModel = value;
-        break;
-      case "telegramToken":
-        partial.telegramToken = value;
-        break;
-      case "telegramChatId":
-        partial.telegramChatId = value;
-        break;
-      case "tavilyApiKey":
-        partial.tavilyApiKey = value;
-        break;
-      case "providerMode":
-        if (value !== "cli" && value !== "api") {
-          return { error: "providerMode must be 'cli' or 'api'." };
-        }
-        partial.providerMode = value;
-        break;
-      case "apiProvider":
-        if (!isApiProviderName(value)) {
-          return { error: "apiProvider must be one of: " + API_PROVIDER_IDS.join(", ") };
-        }
-        partial.apiProvider = value;
-        break;
-      case "onboardingCompleted":
-        if (value !== "true" && value !== "false") return { error: "onboardingCompleted must be 'true' or 'false'." };
-        partial.onboardingCompleted = value === "true";
-        break;
-      case "permReadFiles":
-        if (value !== "true" && value !== "false") return { error: "permReadFiles must be 'true' or 'false'." };
-        partial.permReadFiles = value === "true";
-        break;
-      case "permSuggestEdits":
-        if (value !== "true" && value !== "false") return { error: "permSuggestEdits must be 'true' or 'false'." };
-        partial.permSuggestEdits = value === "true";
-        break;
-      case "requireCommandApproval":
-        if (value !== "true" && value !== "false") return { error: "requireCommandApproval must be 'true' or 'false'." };
-        partial.requireCommandApproval = value === "true";
-        break;
-      case "enableVision":
-        if (value !== "true" && value !== "false") return { error: "enableVision must be 'true' or 'false'." };
-        partial.enableVision = value === "true";
-        break;
-      case "enableReflection":
-        if (value !== "true" && value !== "false") return { error: "enableReflection must be 'true' or 'false'." };
-        partial.enableReflection = value === "true";
-        break;
-      case "allowLocalNetworkAccess":
-        if (value !== "true" && value !== "false") return { error: "allowLocalNetworkAccess must be 'true' or 'false'." };
-        partial.allowLocalNetworkAccess = value === "true";
-        break;
-      case "budgetUsd": {
-        const n = Number(value);
-        if (!Number.isFinite(n) || n < 0) return { error: "budgetUsd must be a number ≥ 0 (0 disables the budget)." };
-        partial.budgetUsd = n;
-        break;
-      }
-      default:
-        // Ignore unknown keys.
-        break;
-    }
-  }
-  return partial;
 }
 
 /** Best-effort render of a stored session's history back into chat messages. */
